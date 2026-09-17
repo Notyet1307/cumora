@@ -480,6 +480,33 @@ export const env = {
    *  Keep it OUT of git — configure it as a server secret only. */
   FCM_SERVICE_ACCOUNT_JSON: process.env.FCM_SERVICE_ACCOUNT_JSON ?? '',
   FCM_SERVICE_ACCOUNT_PATH: process.env.FCM_SERVICE_ACCOUNT_PATH ?? '',
+  /* ── WeKnora retrieval (optional, read-only) ─────────────────────────
+   *  Server-side search over ONE operator-pinned WeKnora knowledge base,
+   *  surfaced to agents as the `kb search` CLI verb. Agents never see the
+   *  endpoint or the key — they can only supply a query, and the server
+   *  decides which knowledge base answers and whether the caller may ask
+   *  at all. Every field below must be set before the verb does anything;
+   *  a missing or empty allowlist denies everyone (there is deliberately
+   *  no "allow all" spelling). See server/src/agents/weknora.ts. */
+  WEKNORA_BASE_URL: (process.env.WEKNORA_BASE_URL ?? '').replace(/\/+$/, ''),
+  /** Sent as X-API-Key to WeKnora. Server-side only; never forwarded into
+   *  an agent's environment (the secure engine sandbox denies new env
+   *  vars to model-spawned subprocesses anyway). */
+  WEKNORA_API_KEY: process.env.WEKNORA_API_KEY ?? '',
+  /** The single knowledge base agents may search. Not model-overridable —
+   *  `kb search` accepts no kb argument. */
+  WEKNORA_KB_ID: process.env.WEKNORA_KB_ID ?? '',
+  /** Ids that may call the tool. A caller must appear in BOTH lists. */
+  WEKNORA_ALLOWED_COMPANY_IDS: (process.env.WEKNORA_ALLOWED_COMPANY_IDS ?? '')
+    .split(',').map((s) => s.trim()).filter(Boolean),
+  WEKNORA_ALLOWED_AGENT_IDS: (process.env.WEKNORA_ALLOWED_AGENT_IDS ?? '')
+    .split(',').map((s) => s.trim()).filter(Boolean),
+  /** Wall-clock cap on one upstream search call. */
+  WEKNORA_TIMEOUT_MS: Number(process.env.WEKNORA_TIMEOUT_MS ?? 15_000),
+  /** Hard cap on chunks returned, whatever the caller asks for. */
+  WEKNORA_MAX_CHUNKS: Number(process.env.WEKNORA_MAX_CHUNKS ?? 5),
+  /** Hard cap on upstream response bytes read into memory. */
+  WEKNORA_MAX_RESPONSE_BYTES: Number(process.env.WEKNORA_MAX_RESPONSE_BYTES ?? 256_000),
 }
 
 // Production-secret gate: refuse to boot in production while any security
