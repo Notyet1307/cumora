@@ -30,12 +30,13 @@ process.env.WEKNORA_ALLOWED_COMPANY_IDS = 'personal'
 process.env.WEKNORA_ALLOWED_AGENT_IDS = 'compliance'
 process.env.WEKNORA_MAX_CHUNKS = '3'
 process.env.WEKNORA_TIMEOUT_MS = '2000'
+const actor = { agentId: 'compliance', companyId: 'personal' }
 
 const { env } = await import('../env.js')
 // Dynamic on purpose: env.ts snapshots process.env at module evaluation, so
 // the baseline above must be in place before this module graph loads. A static
 // import would be hoisted ahead of the assignments and read the real .env.
-const { formatWeknoraSearch, searchWeknora, weknoraDenial, weknoraMissingConfig } = await import('../agents/weknora.js')
+const { formatWeknoraSearch, searchWeknora, weknoraDenial, logWeknoraCall } = await import('../agents/weknora.js')
 
 const realFetch = globalThis.fetch
 /** Capture the last request while returning a canned response. */
@@ -65,42 +66,40 @@ const SAMPLE_ROW = {
 
 // ── authorization ───────────────────────────────────────────────────────
 
-test('denial: an empty agent allowlist authorizes nobody', () => {
-  const original = env.WEKNORA_ALLOWED_AGENT_IDS
-  env.WEKNORA_ALLOWED_AGENT_IDS = []
+test('retrieval itself refuses unauthorized actors before HTTP, even without CLI preflight', async () => {
+  const stub = stubFetch(() => searchPayload([SAMPLE_ROW]))
   try {
-    // The company is listed, the caller is an active agent — still refused.
-    assert.match(weknoraDenial({ agentId: 'compliance', companyId: 'personal' }) ?? '', /agent compliance 不在授权列表/)
+    for (const caller of [
+      { agentId: 'reporter', companyId: 'personal' },
+      { agentId: 'compliance', companyId: 'other-co' },
+      { agentId: 'compliance', companyId: null },
+    ]) {
+      assert.notEqual(weknoraDenial(caller), null)
+      const result = await searchWeknora({ ...caller, query: '影响评估' })
+      assert.equal(result.ok, false)
+    }
+    assert.equal(stub.calls.length, 0)
   } finally {
-    env.WEKNORA_ALLOWED_AGENT_IDS = original
+    globalThis.fetch = realFetch
   }
 })
 
-test('denial: a caller outside the authorized workspace is refused', () => {
-  assert.match(weknoraDenial({ agentId: 'compliance', companyId: 'other-co' }) ?? '', /workspace other-co 不在授权列表/)
-})
-
-test('denial: an unauthorized agent is refused, even inside the authorized workspace', () => {
-  assert.match(weknoraDenial({ agentId: 'reporter', companyId: 'personal' }) ?? '', /agent reporter 不在授权列表/)
-})
-
-test('denial: an unresolved company (non-agent or offboarded caller) is refused', () => {
-  assert.match(weknoraDenial({ agentId: 'compliance', companyId: null }) ?? '', /不是有效的 workspace 成员/)
-})
-
-test('allow: both allowlists must match, and then the call is authorized', () => {
-  assert.equal(weknoraDenial({ agentId: 'compliance', companyId: 'personal' }), null)
-})
-
-test('missing config names the variables the operator must set', () => {
-  const original = env.WEKNORA_BASE_URL
-  env.WEKNORA_BASE_URL = ''
+test('empty allowlists and missing configuration refuse retrieval before HTTP', async () => {
+  const original = { ...env }
+  const stub = stubFetch(() => searchPayload([SAMPLE_ROW]))
   try {
-    assert.deepEqual(weknoraMissingConfig(), ['WEKNORA_BASE_URL'])
-    // An unconfigured deployment refuses before any allowlist is consulted.
-    assert.match(weknoraDenial({ agentId: 'compliance', companyId: 'personal' }) ?? '', /未配置（缺少 WEKNORA_BASE_URL）/)
+    for (const override of [
+      { WEKNORA_ALLOWED_AGENT_IDS: [] }, { WEKNORA_ALLOWED_COMPANY_IDS: [] },
+      { WEKNORA_BASE_URL: '' }, { WEKNORA_API_KEY: '' }, { WEKNORA_KB_ID: '' },
+    ]) {
+      Object.assign(env, original, override)
+      const result = await searchWeknora({ ...actor, query: '影响评估' })
+      assert.equal(result.ok, false)
+    }
+    assert.equal(stub.calls.length, 0)
   } finally {
-    env.WEKNORA_BASE_URL = original
+    Object.assign(env, original)
+    globalThis.fetch = realFetch
   }
 })
 
@@ -109,7 +108,7 @@ test('missing config names the variables the operator must set', () => {
 test('search pins the knowledge base from config and sends only the query', async () => {
   const stub = stubFetch(() => searchPayload([SAMPLE_ROW]))
   try {
-    const result = await searchWeknora({ query: '影响评估' })
+    const result = await searchWeknora({ ...actor, query: '影响评估' })
     assert.equal(result.ok, true)
     assert.equal(stub.calls.length, 1)
     assert.equal(stub.calls[0].url, 'http://weknora.test/api/v1/knowledge-search')
@@ -129,7 +128,7 @@ test('search caps --limit at the configured maximum', async () => {
   stubFetch(() => searchPayload([SAMPLE_ROW, SAMPLE_ROW, SAMPLE_ROW, SAMPLE_ROW]))
   try {
     // WEKNORA_MAX_CHUNKS=3; a caller asking for 50 still gets 3.
-    const result = await searchWeknora({ query: 'x', limit: 50 })
+    const result = await searchWeknora({ ...actor, query: 'x', limit: 50 })
     assert.equal(result.ok, true)
     if (result.ok) {
       assert.equal(result.limit, 3)
@@ -143,7 +142,7 @@ test('search caps --limit at the configured maximum', async () => {
 test('search refuses an empty query without calling upstream', async () => {
   const stub = stubFetch(() => searchPayload([]))
   try {
-    const result = await searchWeknora({ query: '   ' })
+    const result = await searchWeknora({ ...actor, query: '   ' })
     assert.equal(result.ok, false)
     if (!result.ok) assert.match(result.reason, /查询为空/)
     assert.equal(stub.calls.length, 0)
@@ -157,7 +156,7 @@ test('search refuses an empty query without calling upstream', async () => {
 test('an auth failure is reported as a key/permission problem', async () => {
   stubFetch(() => new Response('{"error":"unauthorized"}', { status: 401 }))
   try {
-    const result = await searchWeknora({ query: 'x' })
+    const result = await searchWeknora({ ...actor, query: 'x' })
     assert.equal(result.ok, false)
     if (!result.ok) {
       assert.match(result.reason, /HTTP 401/)
@@ -175,7 +174,7 @@ test('a timeout is reported as a timeout, not as an empty result', async () => {
     throw err
   }) as typeof globalThis.fetch
   try {
-    const result = await searchWeknora({ query: 'x' })
+    const result = await searchWeknora({ ...actor, query: 'x' })
     assert.equal(result.ok, false)
     if (!result.ok) assert.match(result.reason, /上游超时（2000ms）/)
   } finally {
@@ -188,7 +187,7 @@ test('an oversized response is refused instead of buffered', async () => {
   env.WEKNORA_MAX_RESPONSE_BYTES = 16_384
   stubFetch(() => searchPayload([{ ...SAMPLE_ROW, content: 'x'.repeat(40_000) }]))
   try {
-    const result = await searchWeknora({ query: 'x' })
+    const result = await searchWeknora({ ...actor, query: 'x' })
     assert.equal(result.ok, false)
     if (!result.ok) assert.match(result.reason, /超过 16384 字节上限/)
   } finally {
@@ -200,7 +199,7 @@ test('an oversized response is refused instead of buffered', async () => {
 test('a non-JSON body is reported instead of parsed into an empty result', async () => {
   stubFetch(() => new Response('<html>gateway</html>', { status: 200 }))
   try {
-    const result = await searchWeknora({ query: 'x' })
+    const result = await searchWeknora({ ...actor, query: 'x' })
     assert.equal(result.ok, false)
     if (!result.ok) assert.match(result.reason, /不是合法 JSON/)
   } finally {
@@ -211,7 +210,7 @@ test('a non-JSON body is reported instead of parsed into an empty result', async
 test('an upstream body echoing the key is redacted', async () => {
   stubFetch(() => new Response('key test-key-do-not-log rejected', { status: 403 }))
   try {
-    const result = await searchWeknora({ query: 'x' })
+    const result = await searchWeknora({ ...actor, query: 'x' })
     assert.equal(result.ok, false)
     if (!result.ok) {
       assert.doesNotMatch(result.reason, /test-key-do-not-log/)
@@ -231,7 +230,7 @@ test('hits keep the citable metadata and drop rows that cannot be cited', async 
     { id: 'chunk-3', knowledge_id: 'know-3', content: '' },
   ]))
   try {
-    const result = await searchWeknora({ query: '评估' })
+    const result = await searchWeknora({ ...actor, query: '评估' })
     assert.equal(result.ok, true)
     if (result.ok) {
       assert.equal(result.hits.length, 1)
@@ -251,7 +250,7 @@ test('hits keep the citable metadata and drop rows that cannot be cited', async 
 test('formatted hits carry the data-not-instructions banner and the score caveat', async () => {
   stubFetch(() => searchPayload([SAMPLE_ROW]))
   try {
-    const result = await searchWeknora({ query: '影响评估' })
+    const result = await searchWeknora({ ...actor, query: '影响评估' })
     assert.equal(result.ok, true)
     if (!result.ok) return
     const text = formatWeknoraSearch(result, '影响评估')
@@ -267,16 +266,49 @@ test('formatted hits carry the data-not-instructions banner and the score caveat
   }
 })
 
-test('a zero-hit search says so plainly', async () => {
+test('zero hits are distinguishable from upstream failure', async () => {
   stubFetch(() => searchPayload([]))
   try {
-    const result = await searchWeknora({ query: '不存在的主题' })
+    const result = await searchWeknora({ ...actor, query: '不存在的主题' })
     assert.equal(result.ok, true)
-    if (!result.ok) return
-    const text = formatWeknoraSearch(result, '不存在的主题')
-    assert.match(text, /命中 0 条/)
-    assert.match(text, /没有命中/)
+    if (result.ok) assert.deepEqual(result.hits, [])
   } finally {
     globalThis.fetch = realFetch
+  }
+})
+
+test('a config change during fetch cannot relabel results or disclose the original credential', async () => {
+  const original = { ...env }
+  const logged: string[] = []
+  const realLog = console.log
+  console.log = (line: string) => { logged.push(line) }
+  const stub = stubFetch(() => {
+    env.WEKNORA_BASE_URL = 'http://other.test'
+    env.WEKNORA_KB_ID = 'other-kb'
+    env.WEKNORA_API_KEY = 'rotated-key'
+    return searchPayload([SAMPLE_ROW])
+  })
+  try {
+    const result = await searchWeknora({ ...actor, query: '影响评估' })
+    assert.equal(result.ok, true)
+    if (!result.ok) return
+    assert.equal(result.kbId, 'kb-authorized')
+    assert.match(formatWeknoraSearch(result, '影响评估'), /kb=kb-authorized/)
+    assert.doesNotMatch(formatWeknoraSearch(result, '影响评估'), /other-kb/)
+    logWeknoraCall({ ...actor, kbId: result.kbId, requestId: result.requestId, status: 'ok', hits: result.hits.length, ms: 1, queryChars: 4 })
+    assert.match(logged[0], /kb=kb-authorized/)
+    assert.equal(JSON.parse(String(stub.calls[0].init.body)).knowledge_base_ids[0], 'kb-authorized')
+    Object.assign(env, original)
+    stubFetch(() => {
+      env.WEKNORA_API_KEY = 'rotated-key'
+      return new Response('rejected test-key-do-not-log', { status: 403 })
+    })
+    const failed = await searchWeknora({ ...actor, query: '影响评估' })
+    assert.equal(failed.ok, false)
+    if (!failed.ok) assert.doesNotMatch(failed.reason, /test-key-do-not-log/)
+  } finally {
+    Object.assign(env, original)
+    globalThis.fetch = realFetch
+    console.log = realLog
   }
 })

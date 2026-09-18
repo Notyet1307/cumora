@@ -25,8 +25,9 @@
  *      numbers, no dates, no validity claims, and the score is labelled as a
  *      retrieval similarity rather than a correctness measure.
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { env } from '../env.js'
+import { BindingConfigError, BindingResolver, type ResolvedSearchBinding } from '../integrations/bindings.js'
 
 /** Bounds so a misconfigured deployment can't turn the verb into a
  *  memory/socket sink: values from env are clamped, never trusted. */
@@ -71,8 +72,8 @@ export interface WeknoraHit {
 }
 
 export type WeknoraSearch =
-  | { ok: true; requestId: string; hits: WeknoraHit[]; limit: number; truncatedSnippet: boolean }
-  | { ok: false; requestId: string; reason: string }
+  | { ok: true; requestId: string; kbId: string; hits: WeknoraHit[]; limit: number; truncatedSnippet: boolean }
+  | { ok: false; requestId: string; kbId: string; reason: string }
 
 /** Names missing from the deployment, for the denial message. */
 export function weknoraMissingConfig(): string[] {
@@ -87,16 +88,55 @@ export function weknoraMissingConfig(): string[] {
  *  Callers must treat any non-null value as a hard refusal — there is no
  *  partial access, and no path that skips this check. */
 export function weknoraDenial(args: { agentId: string; companyId: string | null }): string | null {
+  const resolved = resolveWeknoraBinding(args)
+  return typeof resolved === 'string' ? resolved : null
+}
+
+// Credential generations are opaque and process-local: never hash a secret into
+// public configuration metadata. R1 env is loaded once per server process.
+let credentialValue: string | undefined
+let credentialRevision = ''
+
+/** R1 has one deployment-owned connection. Its existing env is the only source. */
+function resolveWeknoraBinding(args: { agentId: string; companyId: string | null }): ResolvedSearchBinding | string {
   const missing = weknoraMissingConfig()
   if (missing.length > 0) return `WeKnora 检索未配置（缺少 ${missing.join(' / ')}）`
-  if (!args.companyId) return `调用者 ${args.agentId} 不是有效的 workspace 成员`
-  if (!env.WEKNORA_ALLOWED_COMPANY_IDS.includes(args.companyId)) {
-    return `workspace ${args.companyId} 不在授权列表`
+  if (credentialValue !== env.WEKNORA_API_KEY) {
+    credentialValue = env.WEKNORA_API_KEY
+    credentialRevision = randomUUID()
   }
-  if (!env.WEKNORA_ALLOWED_AGENT_IDS.includes(args.agentId)) {
-    return `agent ${args.agentId} 不在授权列表`
+  const version = createHash('sha256').update(JSON.stringify([
+    env.WEKNORA_BASE_URL, env.WEKNORA_KB_ID,
+    [...env.WEKNORA_ALLOWED_COMPANY_IDS].sort(), [...env.WEKNORA_ALLOWED_AGENT_IDS].sort(),
+    env.WEKNORA_MAX_CHUNKS, env.WEKNORA_TIMEOUT_MS, env.WEKNORA_MAX_RESPONSE_BYTES, credentialRevision,
+  ])).digest('hex')
+  try {
+    const resolver = new BindingResolver({
+      schemaVersion: 1,
+      connections: [{
+        id: 'weknora-r1', version, kind: 'tool', backend: 'weknora',
+        baseUrl: env.WEKNORA_BASE_URL, secretRef: 'WEKNORA_API_KEY', credentialRevision,
+        knowledgeBaseIds: [env.WEKNORA_KB_ID], enabled: true,
+      }],
+      bindings: [{
+        id: 'weknora-r1', version, kind: 'tool', capabilityId: 'weknora.search',
+        connectionId: 'weknora-r1', connectionVersion: version, enabled: true,
+        companyIds: env.WEKNORA_ALLOWED_COMPANY_IDS, subjectIds: env.WEKNORA_ALLOWED_AGENT_IDS,
+        knowledgeBaseId: env.WEKNORA_KB_ID,
+      }],
+    }, { WEKNORA_API_KEY: env.WEKNORA_API_KEY })
+    const result = resolver.resolve({ subjectId: args.agentId, companyId: args.companyId }, 'weknora.search', 'tool')
+    if (result.ok) return result.binding
+    switch (result.code) {
+      case 'invalid_actor': return `调用者 ${args.agentId} 不是有效的 workspace 成员`
+      case 'company_denied': return `workspace ${args.companyId} 不在授权列表`
+      case 'subject_denied': return `agent ${args.agentId} 不在授权列表`
+      default: return `WeKnora 检索绑定不可用（${result.code}）`
+    }
+  } catch (e) {
+    if (e instanceof BindingConfigError) return `WeKnora 检索绑定不可用（${e.code}）`
+    throw e
   }
-  return null
 }
 
 /** Read at most `maxBytes` from a response, reporting whether we hit the cap.
@@ -150,8 +190,7 @@ function toHits(payload: unknown): WeknoraHit[] {
 
 /** Strip anything that looks like the configured key out of upstream text
  *  before it can reach a log line or a model transcript. */
-function redact(text: string): string {
-  const key = env.WEKNORA_API_KEY
+function redact(text: string, key: string): string {
   return key && text.includes(key) ? text.split(key).join('[redacted]') : text
 }
 
@@ -159,14 +198,16 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-/** Search the pinned knowledge base. Never throws: every failure comes back
- *  as `{ ok: false }` so the CLI can hand the agent a readable reason. */
-export async function searchWeknora(args: { query: string; limit?: number }): Promise<WeknoraSearch> {
+/** Authorize before HTTP and retain the selected connection for the whole call. */
+export async function searchWeknora(args: { agentId: string; companyId: string | null; query: string; limit?: number }): Promise<WeknoraSearch> {
   const requestId = randomUUID().slice(0, 8)
+  const resolved = resolveWeknoraBinding(args)
+  const kbId = typeof resolved === 'string' ? env.WEKNORA_KB_ID : resolved.knowledgeBaseId
+  if (typeof resolved === 'string') return { ok: false, requestId, kbId, reason: resolved }
   const query = args.query.trim()
-  if (!query) return { ok: false, requestId, reason: '查询为空' }
+  if (!query) return { ok: false, requestId, kbId, reason: '查询为空' }
   if (query.length > MAX_QUERY_CHARS) {
-    return { ok: false, requestId, reason: `查询过长（${query.length} > ${MAX_QUERY_CHARS} 字符）` }
+    return { ok: false, requestId, kbId, reason: `查询过长（${query.length} > ${MAX_QUERY_CHARS} 字符）` }
   }
 
   const maxChunks = clampInt(env.WEKNORA_MAX_CHUNKS, MAX_CHUNKS_RANGE, DEFAULT_MAX_CHUNKS)
@@ -178,19 +219,19 @@ export async function searchWeknora(args: { query: string; limit?: number }): Pr
 
   let res: Response
   try {
-    res = await fetch(`${env.WEKNORA_BASE_URL}/knowledge-search`, {
+    res = await fetch(`${resolved.baseUrl}/knowledge-search`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': env.WEKNORA_API_KEY },
-      // knowledge_base_ids is built from config, never from the caller.
-      body: JSON.stringify({ query, knowledge_base_ids: [env.WEKNORA_KB_ID] }),
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': resolved.apiKey },
+      // Scope and credential come from the same authorized snapshot.
+      body: JSON.stringify({ query, knowledge_base_ids: [kbId] }),
       signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (e) {
     const timedOut = e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')
     return {
       ok: false,
-      requestId,
-      reason: timedOut ? `上游超时（${timeoutMs}ms）` : `上游不可达：${redact(errorMessage(e))}`,
+      requestId, kbId,
+      reason: timedOut ? `上游超时（${timeoutMs}ms）` : `上游不可达：${redact(errorMessage(e), resolved.apiKey)}`,
     }
   }
 
@@ -199,25 +240,25 @@ export async function searchWeknora(args: { query: string; limit?: number }): Pr
     const hint = res.status === 401 || res.status === 403
       ? '（API key 无效或权限不足）'
       : res.status === 404 ? '（知识库不存在或对该 key 不可见）' : ''
-    const detail = redact(body.text).slice(0, 200).replace(/\s+/g, ' ').trim()
+    const detail = redact(body.text, resolved.apiKey).slice(0, 200).replace(/\s+/g, ' ').trim()
     return {
       ok: false,
-      requestId,
+      requestId, kbId,
       reason: `上游 HTTP ${res.status}${hint}${detail ? `：${detail}` : ''}`,
     }
   }
 
   const { text, truncated } = await readBounded(res, maxBytes)
-  if (truncated) return { ok: false, requestId, reason: `上游响应超过 ${maxBytes} 字节上限` }
+  if (truncated) return { ok: false, requestId, kbId, reason: `上游响应超过 ${maxBytes} 字节上限` }
   let payload: unknown
   try {
     payload = JSON.parse(text)
   } catch {
-    return { ok: false, requestId, reason: '上游返回的不是合法 JSON' }
+    return { ok: false, requestId, kbId, reason: '上游返回的不是合法 JSON' }
   }
 
   const hits = toHits(payload).slice(0, limit)
-  return { ok: true, requestId, hits, limit, truncatedSnippet: hits.some((h) => h.snippet.length >= SNIPPET_CHARS) }
+  return { ok: true, requestId, kbId, hits, limit, truncatedSnippet: hits.some((h) => h.snippet.length >= SNIPPET_CHARS) }
 }
 
 /** One line per call: ids, counts, timings, correlation id. Deliberately no
@@ -227,6 +268,7 @@ export function logWeknoraCall(entry: {
   requestId: string
   agentId: string
   companyId: string | null
+  kbId: string
   status: 'ok' | 'denied' | 'error'
   hits?: number
   ms: number
@@ -234,7 +276,7 @@ export function logWeknoraCall(entry: {
 }): void {
   console.log(
     `[weknora] kb search agent=${entry.agentId} company=${entry.companyId ?? '-'} `
-    + `kb=${env.WEKNORA_KB_ID || '-'} status=${entry.status} hits=${entry.hits ?? 0} `
+    + `kb=${entry.kbId || '-'} status=${entry.status} hits=${entry.hits ?? 0} `
     + `queryChars=${entry.queryChars} ms=${entry.ms} req=${entry.requestId}`,
   )
 }
@@ -243,7 +285,7 @@ export function logWeknoraCall(entry: {
  *  thing standing between a poisoned document and an agent that treats its
  *  text as an order. */
 export function formatWeknoraSearch(result: Extract<WeknoraSearch, { ok: true }>, query: string): string {
-  const head = `WeKnora 知识库检索 · kb=${env.WEKNORA_KB_ID} · 命中 ${result.hits.length} 条 · req=${result.requestId}`
+  const head = `WeKnora 知识库检索 · kb=${result.kbId} · 命中 ${result.hits.length} 条 · req=${result.requestId}`
   if (result.hits.length === 0) {
     return `${head}\n查询：${query.slice(0, 80)}\n没有命中：该知识库中没有与查询相关的内容（换一种说法，或确认资料已入库并完成解析）。`
   }

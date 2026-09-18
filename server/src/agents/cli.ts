@@ -940,18 +940,18 @@ async function cmdKb(parsed: ParsedArgs): Promise<CliResult> {
   if (denial) {
     // Denials are logged too: an agent probing outside its authorization is
     // exactly the signal an operator wants in the log.
-    logWeknoraCall({ requestId: '-', agentId: me, companyId, status: 'denied', ms: 0, queryChars: query.length })
+    logWeknoraCall({ requestId: '-', agentId: me, companyId, kbId: env.WEKNORA_KB_ID, status: 'denied', ms: 0, queryChars: query.length })
     return err(`kb search 已被拒绝：${denial}`)
   }
 
   const limitFlag = parsed.flags.limit === undefined ? undefined : Number(parsed.flags.limit)
-  const result = await searchWeknora({ query, limit: limitFlag })
+  const result = await searchWeknora({ agentId: me, companyId, query, limit: limitFlag })
   if (!result.ok) {
-    logWeknoraCall({ requestId: result.requestId, agentId: me, companyId, status: 'error', ms: Date.now() - startedAt, queryChars: query.length })
+    logWeknoraCall({ requestId: result.requestId, agentId: me, companyId, kbId: result.kbId, status: 'error', ms: Date.now() - startedAt, queryChars: query.length })
     return err(`kb search 失败：${result.reason}（req=${result.requestId}）`)
   }
-  logWeknoraCall({ requestId: result.requestId, agentId: me, companyId, status: 'ok', hits: result.hits.length, ms: Date.now() - startedAt, queryChars: query.length })
-  if (parsed.flags.json) return ok(JSON.stringify({ requestId: result.requestId, kbId: env.WEKNORA_KB_ID, hits: result.hits }, null, 2))
+  logWeknoraCall({ requestId: result.requestId, agentId: me, companyId, kbId: result.kbId, status: 'ok', hits: result.hits.length, ms: Date.now() - startedAt, queryChars: query.length })
+  if (parsed.flags.json) return ok(JSON.stringify({ requestId: result.requestId, kbId: result.kbId, hits: result.hits }, null, 2))
   return ok(formatWeknoraSearch(result, query))
 }
 
