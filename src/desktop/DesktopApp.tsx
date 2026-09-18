@@ -1,7 +1,6 @@
 import { lazy, Suspense, useEffect } from 'react'
 import { useApp } from '@/stores/app'
 import { useDevtools } from '@/stores/devtools'
-import { isElectron } from '@/lib/runtime'
 import { useResizableWidth } from '@/lib/useResizableWidth'
 import { TitleBar } from './TitleBar'
 import { Rail } from './Rail'
@@ -77,24 +76,21 @@ export function DesktopApp() {
     if (view === 'observability' && devtoolsLoaded && !devtoolsEnabled) setView('conversations')
   }, [devtoolsEnabled, devtoolsLoaded, setView, view])
 
-  // In Electron, fill the full window. In browser, render as a "windowed app" card.
-  const wrap = isElectron
-    ? {
-        width: '100vw',
-        height: '100vh',
-        margin: 0,
-        borderRadius: 0,
-        boxShadow: 'none',
-      }
-    : {
-        width: 'min(1480px, calc(100vw - 48px))',
-        height: 'calc(100vh - 48px)',
-        boxShadow: '0 50px 100px -20px rgba(10, 30, 60, 0.25), 0 30px 60px -30px rgba(10, 30, 60, 0.3), 0 0 0 1px rgba(0, 80, 140, 0.06)',
-      }
+  // Fill the viewport in every host. A browser tab has no window chrome of
+  // its own, so the old centred "app card" (margins + 18px radius + drop
+  // shadow + fake traffic lights) read as an app embedded in a web page
+  // rather than as a web page. Electron keeps the identical full-bleed box.
+  const wrap = {
+    width: '100vw',
+    height: '100vh',
+    margin: 0,
+    borderRadius: 0,
+    boxShadow: 'none',
+  }
 
   return (
     <div
-      className={isElectron ? 'relative z-10 bg-cloud overflow-hidden grid grid-rows-[44px_1fr]' : 'relative z-10 mx-auto my-6 bg-cloud rounded-[18px] overflow-hidden grid grid-rows-[44px_1fr] backdrop-blur'}
+      className="relative z-10 bg-cloud overflow-hidden grid grid-rows-[44px_1fr]"
       style={wrap}
     >
       <TitleBar />

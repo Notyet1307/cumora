@@ -27,19 +27,12 @@ export function TitleBar() {
         ...dragStyle,
       }}
     >
-      {!isElectron ? (
-        <div className="flex gap-2" style={{ paddingLeft: 0 }}>
-          <span className="w-3 h-3 rounded-full" style={{ background: '#FF6058', boxShadow: 'inset 0 -1px 0 rgba(0,0,0,0.1)' }} />
-          <span className="w-3 h-3 rounded-full" style={{ background: '#FFBD2E', boxShadow: 'inset 0 -1px 0 rgba(0,0,0,0.1)' }} />
-          <span className="w-3 h-3 rounded-full" style={{ background: '#28C940', boxShadow: 'inset 0 -1px 0 rgba(0,0,0,0.1)' }} />
-        </div>
-      ) : (
-        // Empty cell — native traffic lights paint over this region on mac.
-        // We still need at least `reservedLeft` of width so the title's 1fr
-        // start can't push back to 0 (which would let the title slide under
-        // the traffic lights).
-        <div style={{ minWidth: reservedLeft }} />
-      )}
+      {/* Native traffic lights live in this region on mac; Electron paints
+          them over the cell, browsers have none. The cell keeps a fixed
+          width so the centred title can't slide under them, and we never
+          draw decorative controls — in a browser tab they would look like
+          window chrome that does not work. */}
+      <div style={{ minWidth: reservedLeft }} />
       <div className="flex items-center justify-center gap-2.5 font-display font-medium text-[14px] text-ink-700 tracking-wide whitespace-nowrap">
         <CloudLogo />
         <span>Cumora</span>
