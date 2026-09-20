@@ -338,17 +338,8 @@ async function wakeOne(
   options: WakeOptions = {},
   retryAttempt: number = 0,
 ): Promise<boolean> {
-  // Synthetic wakes can be dropped under load — the next idle tick
-  // or next scanner pass will re-evaluate. Real wakes never are.
-  if ((reason === 'idle' || reason === 'background_scan') && !_consumeLowPriorityWakeBudget()) {
-    console.warn(`[scheduler] ${agentId} ${reason} wake dropped: budget ${LOW_PRIORITY_WAKE_BUDGET_PER_MIN}/min exceeded`)
-    return false
-  }
-
-  // Execution placement is an authorization decision, not a nullable hint.
-  // A connected runtime can receive a direct wake without starting anything;
-  // placement becomes mandatory for managed-message triage and whenever zero
-  // subscribers would send us toward ensurePod.
+  // Recheck native ownership even with an existing subscriber, before triage,
+  // wake or steer. An external member is unavailable here until EA-202 dispatch.
   const resolveHostForWake = async (): Promise<ResolvedAgentHost | null> => {
     const hostResult = await resolveAgentHost(agentId)
     if (hostResult.status === 'missing') {
@@ -371,7 +362,7 @@ async function wakeOne(
           hostResult.reason,
           'host_resolution',
         )
-      } else {
+      } else if (hostResult.code === 'invalid_assignment') {
         void notifyAlert({
           label: 'scheduler.invalid_agent_host_assignment',
           error: new Error(hostResult.reason),
@@ -383,10 +374,16 @@ async function wakeOne(
     return hostResult
   }
 
-  let host: ResolvedAgentHost | null = null
+  const host = await resolveHostForWake()
+  if (!host) return false
+  // Synthetic wakes can be dropped under load — the next idle tick
+  // or next scanner pass will re-evaluate. Real wakes never are.
+  if ((reason === 'idle' || reason === 'background_scan') && !_consumeLowPriorityWakeBudget()) {
+    console.warn(`[scheduler] ${agentId} ${reason} wake dropped: budget ${LOW_PRIORITY_WAKE_BUDGET_PER_MIN}/min exceeded`)
+    return false
+  }
+
   if (options.placementTriage) {
-    host = await resolveHostForWake()
-    if (!host) return false
     // BYOA daemons triage locally. Managed Agents are gated before a live-pod
     // wake or a new Pod; the flag is serialized into retries so recovery cannot
     // bypass the same placement + triage contract.
@@ -467,10 +464,6 @@ async function wakeOne(
 
   if (delivered > 0) return true
 
-  if (!host) {
-    host = await resolveHostForWake()
-    if (!host) return false
-  }
 
   // Is there anything left to catch up ON? `message.new` is backed by the
   // message row, so a runtime that was offline finds it on its next drain and
@@ -552,6 +545,8 @@ async function wakeOne(
     const deadline = Date.now() + 20_000
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 500))
+      const current = await resolveHostForWake()
+      if (!current || current.runtimeAssignmentId !== host.runtimeAssignmentId) return false
       const replayed = await deliverWake(agentId, wakePayload).catch(() => 0)
       if (replayed > 0) return true
     }
@@ -730,6 +725,7 @@ async function wake(payload: MessageNewEvent): Promise<void> {
   const { rows: currentAgentRows } = await pool.query<{ id: string }>(
     `SELECT id FROM participants
       WHERE company_id = $1 AND kind = 'agent' AND departed_at IS NULL
+        AND execution_kind = 'native' AND execution_enabled
         AND id = ANY($2::text[])`,
     [conversation.company_id, members],
   )
@@ -1117,6 +1113,7 @@ export async function handlePollUpdated(event: PollUpdatedEvent): Promise<boolea
         AND author.company_id = c.company_id
         AND author.kind = 'agent'
         AND author.departed_at IS NULL
+        AND author.execution_kind = 'native' AND author.execution_enabled
       WHERE m.id = $1 AND m.company_id = $2
         AND m.conversation_id = $3
         AND c.company_id = $2

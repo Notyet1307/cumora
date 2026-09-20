@@ -153,6 +153,7 @@ async function loadBackgroundScanAgents(): Promise<BackgroundScanAgent[]> {
     `SELECT id, name, role, bio, company_id
        FROM participants p
       WHERE p.kind = 'agent'
+        AND p.execution_kind = 'native' AND p.execution_enabled
         AND p.departed_at IS NULL
         AND EXISTS (
           SELECT 1

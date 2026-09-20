@@ -18,6 +18,8 @@ function fakeDb(rows: Record<string, unknown>[]): HostDb {
 
 const paidCloudRow = {
   company_id: 'co-1',
+  execution_kind: 'native',
+  execution_enabled: true,
   computer_id: 'cloud-co-1',
   runtime_assignment_id: 'assignment-1',
   resolved_computer_id: 'cloud-co-1',
@@ -27,6 +29,14 @@ const paidCloudRow = {
   resolved_company_id: 'co-1',
   tier: 'pro',
 }
+
+test('an external member is never a native host, even with stale Computer placement', async () => {
+  const result = await resolveAgentHost('external-1', fakeDb([{
+    ...paidCloudRow, execution_kind: 'external-service', execution_enabled: true,
+  }]))
+  assert.equal(result.status, 'error')
+  assert.equal(managedPodPlacement(result).status, 'denied')
+})
 
 after(async () => {
   try { await pool.end() } catch { /* ignore */ }

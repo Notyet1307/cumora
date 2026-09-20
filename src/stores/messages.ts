@@ -279,6 +279,8 @@ function fromApi(m: ApiMessage): Message {
     poll: raw.poll ?? undefined,
     pollTallies: raw.pollTallies ?? undefined,
     clientId: raw.clientId ?? undefined,
+    externalDeliveries: m.externalDeliveries ?? undefined,
+    externalResult: m.externalResult ?? undefined,
   }
   ;(out as Message & { sequence?: number }).sequence = m.sequence
   return out
@@ -303,17 +305,28 @@ function sortMessagesStable(messages: Message[]): Message[] {
     .map((x) => x.message)
 }
 
+function mergeExternalDeliveries(current: Message['externalDeliveries'], incoming: Message['externalDeliveries']): Message['externalDeliveries'] {
+  if (!current?.length) return incoming
+  if (!incoming?.length) return current
+  const merged = new Map(current.map(d => [d.id, d]))
+  for (const delivery of incoming) {
+    if (!merged.has(delivery.id) || merged.get(delivery.id)!.revision <= delivery.revision) merged.set(delivery.id, delivery)
+  }
+  return [...merged.values()]
+}
+
 function mergeFetchedMessages(current: Message[] | undefined, incoming: Message[]): Message[] {
   if (!current || current.length === 0) return incoming
 
   const currentById = new Map(current.map((m) => [m.id, m]))
   const incomingIds = new Set(incoming.map((m) => m.id))
   const incomingClientIds = new Set(incoming.map((m) => m.clientId).filter(Boolean))
-  const merged = incoming.map((m) => {
+  const merged: Message[] = incoming.map((m) => {
     const prev = currentById.get(m.id)
     // Keep the local optimistic key stable after a fetch returns the same
     // persisted row. Older servers may omit clientId from the snapshot.
-    return prev?.clientId && !m.clientId ? { ...m, clientId: prev.clientId } : m
+    return { ...m, ...(prev?.clientId && !m.clientId ? { clientId: prev.clientId } : {}),
+      externalDeliveries: mergeExternalDeliveries(prev?.externalDeliveries, m.externalDeliveries) }
   })
 
   for (const m of current) {
@@ -519,6 +532,13 @@ export const useMessages = create<MessagesState>((set, get) => ({
   },
 
   applyEvent(e) {
+    if (e.type === 'external.delivery') {
+      set(s => ({ byConvo: { ...s.byConvo, [e.conversationId]: (s.byConvo[e.conversationId] ?? []).map(message =>
+        message.id === e.delivery.sourceMessageId ? { ...message,
+          externalDeliveries: mergeExternalDeliveries(message.externalDeliveries, [e.delivery]),
+        } : message) } }))
+      return
+    }
     if (e.type === 'message.new') {
       const m = fromApi(e.message)
       clearTypingExpiry(e.conversationId, m.authorId)
@@ -540,7 +560,8 @@ export const useMessages = create<MessagesState>((set, get) => ({
         // Carry the optimistic clientId onto the server echo so the React
         // list key (m.clientId ?? m.id) stays stable across the replacement
         // — otherwise the row remounts and re-animates.
-        const merged: Message = prior?.clientId ? { ...m, clientId: prior.clientId } : m
+        const merged: Message = { ...m, ...(prior?.clientId ? { clientId: prior.clientId } : {}),
+          externalDeliveries: mergeExternalDeliveries(prior?.externalDeliveries, m.externalDeliveries) }
         if (prior?.clientId) {
           console.info('[message-delivery]', {
             phase: 'client.confirmed', via: 'ws', status: 'sent',

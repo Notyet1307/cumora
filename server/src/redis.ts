@@ -1,5 +1,7 @@
 import IORedis from 'ioredis'
 import { env } from './env.js'
+import type { AnswerPresentation } from './integrations/agent-evidence.js'
+import type { DeliveryStatusView } from './integrations/member-agent.js'
 
 // When the agent runtime is in http mode (pod talking to a remote
 // server), Redis is never used from this process — every pub/sub flows
@@ -93,6 +95,8 @@ export interface MessageNewEvent extends TenantTagged {
     reactions?: unknown
     tool?: unknown
     attachment?: unknown
+    externalResult?: Omit<AnswerPresentation, 'body'> & { deliveryId: string; invocationId: string }
+    externalDeliveries?: DeliveryStatusView[]
     /** Echoed verbatim from the POST body when the sender provided one.
      *  The renderer uses it to dedup the WS echo against its still-temp
      *  optimistic bubble when the WS event races the POST response — id
@@ -430,6 +434,7 @@ export type BroadcastEvent = MessageNewEvent | MessageDeltaEvent | TypingEvent
   | PollUpdatedEvent
   | ComputerStatusEvent
   | WorkspaceMembershipEvent
+  | { type: 'external.delivery'; companyId: string; conversationId: string; delivery: DeliveryStatusView }
 
 export async function publish(channel: string, event: BroadcastEvent): Promise<void> {
   await redis.publish(channel, JSON.stringify(event))

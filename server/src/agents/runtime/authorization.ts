@@ -24,6 +24,7 @@ export async function isRuntimeAgentAuthorized(
         AND p.computer_id IS NOT DISTINCT FROM $3::text
         AND p.runtime_assignment_id = $4
         AND p.kind = 'agent' AND p.departed_at IS NULL
+        AND p.execution_kind = 'native' AND p.execution_enabled
         AND (p.computer_id IS NULL OR c.id IS NOT NULL)
       LIMIT 1`,
     [claims.sub, claims.companyId, claims.computerId, claims.assignmentId],
@@ -49,6 +50,7 @@ export async function withRuntimeAgentRunAuthorization<T>(args: {
       `SELECT id FROM participants
         WHERE id = $1 AND company_id = $2
           AND kind = 'agent' AND departed_at IS NULL
+          AND execution_kind = 'native' AND execution_enabled
         FOR SHARE`,
       [args.agentId, args.companyId],
     )
@@ -98,6 +100,7 @@ export async function withRuntimeConversationAuthorization<T>(args: {
       `SELECT id FROM participants
         WHERE id = $1 AND company_id = $2
           AND kind = 'agent' AND departed_at IS NULL
+          AND execution_kind = 'native' AND execution_enabled
         FOR SHARE`,
       [args.agentId, args.companyId],
     )
@@ -151,6 +154,7 @@ export async function withRuntimeMessageReadAuthorization<T>(args: {
       `SELECT id FROM participants
         WHERE id = $1 AND company_id = $2
           AND kind = 'agent' AND departed_at IS NULL
+          AND execution_kind = 'native' AND execution_enabled
         FOR SHARE`,
       [args.agentId, args.companyId],
     )

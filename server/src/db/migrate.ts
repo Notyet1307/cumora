@@ -46,6 +46,9 @@ import {
   AGENT_ROUTING_CLAIMS_SQL,
   agentRoutingClaimsChecksum,
 } from './migrations/0009-agent-routing-claims.js'
+import { EXTERNAL_INVOCATIONS_SQL, externalInvocationsChecksum } from './migrations/0010-external-invocations.js'
+import { AGENT_EXECUTION_SQL, agentExecutionChecksum } from './migrations/0011-agent-execution.js'
+import { EXTERNAL_MESSAGE_DELIVERIES_SQL, externalMessageDeliveriesChecksum } from './migrations/0012-external-message-deliveries.js'
 
 /** Frozen data backfill embedded in migration 0001. Exported so its behavior
  * can be exercised against PostgreSQL without replaying the whole migration. */
@@ -2615,6 +2618,24 @@ const VERSIONED_MIGRATIONS: readonly VersionedMigration[] = [
     sourceChecksum: agentRoutingClaimsChecksum(),
     transactional: true,
     up: applyAgentRoutingClaims,
+  },
+  {
+    ...SCHEMA_MIGRATIONS[9],
+    sourceChecksum: externalInvocationsChecksum(),
+    transactional: true,
+    up: async (client) => { await client.query(EXTERNAL_INVOCATIONS_SQL) },
+  },
+  {
+    ...SCHEMA_MIGRATIONS[10],
+    sourceChecksum: agentExecutionChecksum(),
+    transactional: true,
+    up: async (client) => { await client.query(AGENT_EXECUTION_SQL) },
+  },
+  {
+    ...SCHEMA_MIGRATIONS[11],
+    sourceChecksum: externalMessageDeliveriesChecksum(),
+    transactional: true,
+    up: async (client) => { await client.query(EXTERNAL_MESSAGE_DELIVERIES_SQL) },
   },
 ]
 

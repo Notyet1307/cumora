@@ -33,6 +33,9 @@ import { mintAgentRuntimeToken, revokeComputer } from '../agents/computer/regist
 import { signAgentToken, verifyAgentToken } from '../agents/runtime/jwt.js'
 import { pool } from '../db/pool.js'
 import { ensureSchemaOnce, resetAllTables, teardownAll } from './_helpers.js'
+import { createAgentRecord } from '../agents/create.js'
+import { deliver } from '../agents/runtime/wake-bus.js'
+import { inprocClient } from '../agents/runtime/inproc-client.js'
 
 let server: Server
 let baseUrl = ''
@@ -570,6 +573,45 @@ test('[integration] runtime: host reassignment generations and Computer revocati
   })
   assert.equal(revoked.status, 403)
   assert.match(String(revoked.body?.error ?? ''), /assignment changed|revoked/i)
+})
+
+test('[integration] runtime: external assignment rejects even a signed current-generation token on every native route', async () => {
+  const native = await seedAgent()
+  const external = await createAgentRecord({ companyId: native.companyId, tier: 'pro', maxActiveAgents: 10,
+    name: 'External runtime', systemPrompt: 'External only', executionKind: 'external-service' })
+  const row = (await pool.query('SELECT runtime_assignment_id FROM participants WHERE id=$1', [external.id])).rows[0]
+  const token = signAgentToken({ agentId: external.id, companyId: native.companyId, computerId: null, assignmentId: row.runtime_assignment_id })
+  for (const path of ['persona', 'inbox', 'agenda', 'inbox-triage/payload', 'cli', 'wake-stream']) {
+    const response = await fetch(`${baseUrl}/runtime/${path}`, { method: path === 'cli' ? 'POST' : 'GET',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      ...(path === 'cli' ? { body: JSON.stringify({ argv: ['--help'] }) } : {}),
+      signal: AbortSignal.timeout(3000) })
+    try { assert.equal(response.status, 403, path) } finally { await response.body?.cancel() }
+  }
+})
+
+test('[integration] runtime: disable revokes a connected stream and re-enable never resurrects its old credential', async () => {
+  const native = await seedAgent()
+  const old = await mintAssignedAgentRuntimeToken(native)
+  assert.ok(await inprocClient.loadPersona(native.agentId))
+  const abort = new AbortController()
+  const response = await fetch(`${baseUrl}/runtime/wake-stream`, {
+    headers: { authorization: `Bearer ${old.token}` }, signal: abort.signal,
+  })
+  const reader = response.body!.getReader()
+  try {
+    const ready = await reader.read()
+    assert.match(new TextDecoder().decode(ready.value), /event: ready/)
+    await pool.query('UPDATE participants SET execution_enabled=FALSE WHERE id=$1', [native.agentId])
+    assert.equal(await inprocClient.loadPersona(native.agentId), null)
+    await deliver(native.agentId, { kind: 'wake', reason: 'manual', conversationId: null })
+    assert.equal((await reader.read()).done, true, 'revoked stream must close without disclosing the next event')
+    await pool.query('UPDATE participants SET execution_enabled=TRUE WHERE id=$1', [native.agentId])
+    assert.equal((await call('/runtime/inbox', { method: 'GET', token: old.token })).status, 403)
+    const fresh = await mintAgentRuntimeToken({ agentId: native.agentId, computerId: old.computerId })
+    assert.ok(fresh)
+    assert.equal((await call('/runtime/inbox', { method: 'GET', token: fresh.token })).status, 200)
+  } finally { await reader.cancel(); abort.abort() }
 })
 
 test('[integration] runtime: /inbox-triage/payload rejects a stale token before loading the new tenant inbox', async () => {

@@ -501,19 +501,72 @@ const cumoraMarkdownComponents = {
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 const REMARK_PLUGINS = [remarkGfm, remarkBreaks, remarkCumora]
+const EXTERNAL_MARKDOWN_COMPONENTS: Components = {
+  ...cumoraMarkdownComponents,
+  a: ({ children }) => <span>{children}（外部链接未验证）</span>,
+  img: () => <span>图片资源未接入</span>,
+  code: ({ children }) => <code className="whitespace-pre-wrap">{children}</code>,
+}
 
 /** Renders a message body as Markdown — full CommonMark + GFM via react-markdown,
  *  plus Cumora's own tokens (mentions / artifacts / emoji) — all styled to the
  *  app's look (see cumoraMarkdownComponents). `skipHtml` drops any raw HTML in
  *  agent/user content so messages can't inject markup. */
-export function RichBody({ body, conversationId }: { body: string; conversationId?: string | null }) {
+export function RichBody({ body, conversationId, external = false }: { body: string; conversationId?: string | null; external?: boolean }) {
   return (
     <ConversationIdContext.Provider value={conversationId ?? null}>
-      <Markdown remarkPlugins={REMARK_PLUGINS} components={cumoraMarkdownComponents} skipHtml>
+      <Markdown remarkPlugins={external ? [remarkGfm, remarkBreaks] : REMARK_PLUGINS} components={external ? EXTERNAL_MARKDOWN_COMPONENTS : cumoraMarkdownComponents} skipHtml>
         {body}
       </Markdown>
     </ConversationIdContext.Provider>
   )
+}
+
+const DELIVERY_LABELS = {
+  queued: '外部成员：已排队', running: '外部成员：执行中', blocked_unknown: '结果未知，成员队列已阻断',
+  withheld: '授权或原问题已变更，结果未发布', completed: '外部成员：已完成', failed: '外部成员：失败 / 不可用',
+}
+
+function ExternalDetails({ id }: { id: string }) {
+  const [detail, setDetail] = useState<{ status: string; reason?: string; answer?: string } | null>(null)
+  const [loading, setLoading] = useState(false)
+  return <div className="mt-1 text-xs text-ink-500">
+    <button type="button" disabled={loading} className="underline" onClick={async () => {
+      setLoading(true)
+      try { setDetail(await api.getExternalDelivery(id)) }
+      catch { setDetail({ status: 'unavailable', reason: '当前无权读取或服务不可用' }) }
+      finally { setLoading(false) }
+    }}>{loading ? '读取中…' : '查看调用详情（临时副本保留 7 天）'}</button>
+    {detail && <div role="status" className="mt-1">
+      {detail.status === 'expired' ? '调用详情已过期；已发布聊天正文按聊天记录保留，不会重新执行。'
+        : detail.answer ? '全文已与对应上游回答核对；原规范事实仍须人工复核。'
+        : `${detail.status}${detail.reason ? ` · ${detail.reason}` : ''}`}
+      {detail.answer && <pre className="whitespace-pre-wrap break-words text-ink-700">{detail.answer}</pre>}
+    </div>}
+  </div>
+}
+
+function ExternalMessageEvidence({ msg }: { msg: Message }) {
+  return <>
+    {msg.externalDeliveries?.map(delivery => <div key={delivery.id} role="status" className="mt-2 p-2 rounded border border-ink-100 text-xs text-ink-600">
+      <span>{delivery.memberId} · {DELIVERY_LABELS[delivery.status]}</span>
+      {delivery.reason && <span> · {delivery.reason}</span>}
+      {delivery.textOnly && <div>仅处理文字正文；图片和附件未转发。</div>}
+      {delivery.invocationId && <div>调用 ID：{delivery.invocationId}</div>}
+      <ExternalDetails id={delivery.id} />
+    </div>)}
+    {msg.externalResult && <div className="mt-2 text-xs text-ink-600">
+      <div>{msg.externalResult.citationStatus === 'verified' ? '引用已关联本轮成功检索；非原规范人工核准。'
+        : msg.externalResult.citationStatus === 'unverified' ? '存在未验证引用，不作为可信来源。' : '未提供可验证引用。'}</div>
+      {msg.externalResult.citations.map(citation => <details key={citation.number} className="mt-2 rounded border border-ink-100 p-2">
+        <summary className="cursor-pointer">[{citation.number}] {citation.title}</summary>
+        <div className="mt-1 whitespace-pre-wrap break-words">{citation.content}</div>
+        <div className="mt-1 break-all">KB {citation.knowledgeBaseId} · 文档 {citation.knowledgeId} · chunk {citation.chunkId}
+          {citation.chunkIndex !== undefined ? ` · 条块 ${citation.chunkIndex}` : ''} · same-turn-search</div>
+      </details>)}
+      <ExternalDetails id={msg.externalResult.deliveryId} />
+    </div>}
+  </>
 }
 
 type ArtifactRef = { type: 'document' | 'board' | 'card' | 'calendar'; id: string }
@@ -1723,8 +1776,8 @@ function MessageRowImpl({ msg, author, delay = 0, animate = true }: MessageRowPr
   const _isEmail = msg.kind === 'email'
   const isPoll = msg.kind === 'poll'
   const artifactRefs = useMemo(
-    () => artifactRefsForMessage(msg),
-    [msg.body, msg.tool?.arg, msg.tool?.detail],
+    () => msg.externalResult ? [] : artifactRefsForMessage(msg),
+    [msg.body, msg.tool?.arg, msg.tool?.detail, msg.externalResult],
   )
   // Avatar click opens InfoPane for both kinds — humans now have profile
   // cards (their auth email is the most useful new piece). The "yourself"
@@ -1756,9 +1809,10 @@ function MessageRowImpl({ msg, author, delay = 0, animate = true }: MessageRowPr
             color: '#5A2B22',
           } : undefined}
         >
-          <RichBody body={msg.body} conversationId={msg.conversationId} />
+          <RichBody body={msg.body} conversationId={msg.conversationId} external={Boolean(msg.externalResult)} />
         </div>
       )}
+      <ExternalMessageEvidence msg={msg} />
 
       {/* Open-Graph card for the first URL in a chat-style body. Skipped
           for tool / attachment / poll / email kinds — those have their
@@ -1766,7 +1820,7 @@ function MessageRowImpl({ msg, author, delay = 0, animate = true }: MessageRowPr
           noise. The component itself returns null when there's nothing
           useful to render, so this gate is just to avoid spurious
           network calls for non-text messages. */}
-      {!isToolOnly && !isAttachOnly && !isPoll && msg.kind !== 'email' && (() => {
+      {!msg.externalResult && !isToolOnly && !isAttachOnly && !isPoll && msg.kind !== 'email' && (() => {
         const linkUrl = firstUrlInBody(msg.body)
         return linkUrl ? <LinkPreview url={linkUrl} /> : null
       })()}

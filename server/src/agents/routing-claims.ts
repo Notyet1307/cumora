@@ -60,6 +60,7 @@ export async function loadElectionCandidates(agentIds: readonly string[]): Promi
        FROM participants
       WHERE id = ANY($1::text[])
         AND kind = 'agent'
+        AND execution_kind = 'native' AND execution_enabled
         AND departed_at IS NULL`,
     [[...agentIds]],
   )
@@ -261,6 +262,7 @@ export async function defaultFindCursorLaggingMembers(
         AND p.company_id = cm.company_id
         AND p.kind = 'agent'
         AND p.departed_at IS NULL
+        AND p.execution_kind = 'native' AND p.execution_enabled
        JOIN messages m
          ON m.id = $1
        LEFT JOIN conversation_reads cr

@@ -246,6 +246,29 @@ export interface QuotedSummary {
   sequence: number
 }
 
+export interface ExternalDeliveryStatus {
+  id: string
+  memberId: string
+  sourceMessageId: string
+  status: 'queued' | 'running' | 'blocked_unknown' | 'withheld' | 'completed' | 'failed'
+  reason: string | null
+  invocationId: string | null
+  finalMessageId: string | null
+  textOnly: boolean
+  expired: boolean
+  revision: number
+}
+
+export interface ExternalAnswer {
+  deliveryId: string
+  invocationId: string
+  citationStatus: 'verified' | 'unverified' | 'none'
+  citations: Array<{
+    number: number; knowledgeBaseId: string; knowledgeId: string; chunkId: string
+    title: string; content: string; chunkIndex?: string | number; level: 'same-turn-search'
+  }>
+}
+
 export interface Message {
   id: string
   conversationId: string
@@ -254,6 +277,8 @@ export interface Message {
   body: string
   at: string
   reactions?: ReactionEntry[]
+  externalDeliveries?: ExternalDeliveryStatus[]
+  externalResult?: ExternalAnswer
   /** for tool messages */
   tool?: {
     name: string

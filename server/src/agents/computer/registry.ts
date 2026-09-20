@@ -20,6 +20,7 @@ import { pool } from '../../db/pool.js'
 import { CH_STATUS, publish } from '../../redis.js'
 import { normalizeTier, type Tier } from '../../tier.js'
 import { signAgentToken } from '../runtime/jwt.js'
+import { isNativeExecution } from '../execution.js'
 import type { EngineModelCatalog, EngineModelOption, FastModelScope, ModelCatalogSource } from './model-catalog.js'
 
 export type ComputerKind = 'cloud' | 'local' | 'vps'
@@ -625,6 +626,7 @@ export async function mintAgentRuntimeToken(args: {
         AND c.company_id = p.company_id
         AND c.revoked_at IS NULL
       WHERE p.id = $1 AND p.kind = 'agent' AND p.computer_id = $2
+        AND p.execution_kind = 'native' AND p.execution_enabled
         AND p.departed_at IS NULL
         AND p.provider_profile IS NOT DISTINCT FROM $3::text
       LIMIT 1`,
@@ -669,6 +671,7 @@ export async function listAgentsForComputer(computerId: string, supportsProvider
        FROM participants p
        JOIN computers c ON c.id = p.computer_id
       WHERE p.computer_id = $1 AND p.kind = 'agent' AND p.departed_at IS NULL
+        AND p.execution_kind = 'native' AND p.execution_enabled
         AND ($2::boolean OR p.provider_profile IS NULL)
       ORDER BY p.name ASC`,
     [computerId, supportsProviderProfiles],
@@ -785,7 +788,7 @@ export interface MissingAgentHost {
 
 export interface FailedAgentHostResolution {
   status: 'error'
-  code: 'lookup_failed' | 'invalid_assignment'
+  code: 'lookup_failed' | 'invalid_assignment' | 'execution_unavailable'
   reason: string
   cause?: unknown
 }
@@ -829,6 +832,8 @@ export async function resolveAgentHost(
       company_id: string | null
       computer_id: string | null
       runtime_assignment_id: string | null
+      execution_kind: 'native' | 'external-service'
+      execution_enabled: boolean
       resolved_computer_id: string | null
       computer_company_id: string | null
       kind: string | null
@@ -839,6 +844,7 @@ export async function resolveAgentHost(
       `SELECT p.company_id,
               p.computer_id,
               p.runtime_assignment_id,
+              p.execution_kind, p.execution_enabled,
               c.id AS resolved_computer_id,
               c.company_id AS computer_company_id,
               c.kind,
@@ -865,6 +871,9 @@ export async function resolveAgentHost(
     )
     const row = rows[0]
     if (!row) return { status: 'missing' }
+    if (!isNativeExecution(row)) return {
+      status: 'error', code: 'execution_unavailable', reason: 'native execution unavailable for this member',
+    }
     if (!row.company_id || !row.resolved_company_id || !row.runtime_assignment_id) {
       return {
         status: 'error',
@@ -1046,7 +1055,8 @@ export async function assignAgentToComputer(args: {
   params.push(args.agentId, args.companyId)
   const { rowCount } = await pool.query(
     `UPDATE participants SET ${sets.join(', ')}
-      WHERE id = $${params.length - 1} AND company_id = $${params.length} AND kind = 'agent'`,
+      WHERE id = $${params.length - 1} AND company_id = $${params.length} AND kind = 'agent'
+        AND execution_kind = 'native' AND execution_enabled AND departed_at IS NULL`,
     params,
   )
   if (!rowCount) return null
@@ -1227,6 +1237,7 @@ export async function setComputerDefaultEngine(args: {
   const moved = await pool.query(
     `UPDATE participants SET engine = $1
       WHERE computer_id = $2 AND company_id = $3 AND kind = 'agent'
+        AND execution_kind = 'native' AND execution_enabled
         AND departed_at IS NULL AND engine_inherit = TRUE`,
     [engine, args.computerId, args.companyId],
   )

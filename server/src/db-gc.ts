@@ -48,6 +48,9 @@
 import { pool } from './db/pool.js'
 import { env } from './env.js'
 import { inc } from './metrics.js'
+import { InvocationStore } from './integrations/invocations.js'
+
+const externalInvocations = new InvocationStore(pool)
 
 export interface SweepTarget {
   table: string
@@ -117,6 +120,16 @@ export async function runDbGcTick(opts?: { batchSize?: number; maxBatchesPerTabl
   const batchSize = opts?.batchSize ?? env.DB_GC_BATCH
   const maxBatches = opts?.maxBatchesPerTable ?? 10
   const deleted: Record<string, number> = {}
+  // Retain identity/state fences forever; expiring content must not permit remote resubmission.
+  try {
+    for (let i = 0; i < maxBatches; i++) {
+      const redacted = await externalInvocations.purgeExpired(Math.min(batchSize, 10000))
+      if (redacted < Math.min(batchSize, 10000)) break
+    }
+  } catch {
+    console.error('[db-gc] external invocation content expiry failed')
+    inc('db.gc.failed', { table: 'external_invocations' })
+  }
   for (const t of targets()) {
     if (t.days <= 0) continue
     let total = 0

@@ -8,6 +8,7 @@ import {
 import { pool } from '../db/pool.js'
 import { CH_MESSAGE_NEW, CH_REACTIONS, CH_CONVO_UPDATED, CH_DOCS, CH_TYPING, CH_CALENDAR_EVENTS, CH_BOARDS, CH_STATUS, CH_WORKSPACES, publish } from '../redis.js'
 import { enqueueBroadcast, nudgeRealtimeOutbox, withOutboxTransaction } from '../realtime-outbox.js'
+import { getMemberAgent, lockMessageParticipants } from '../integrations/member-agent.js'
 import { enqueueWorkspaceCleanup, nudgeWorkspaceCleanupWorker } from '../workspace-cleanup.js'
 import { collectDocumentStorageKeys, evictDocumentRoom } from '../documents/rooms.js'
 import { createPoll, castVote, closePoll, PollError } from '../polls.js'
@@ -1273,6 +1274,7 @@ api.post('/computers/pair', safe(async (req, res) => {
         `UPDATE participants p
             SET computer_id = $1, engine = COALESCE(NULLIF(p.engine, 'managed'), $2)
           WHERE p.company_id = $3 AND p.kind = 'agent'
+            AND p.execution_kind = 'native' AND p.execution_enabled AND p.departed_at IS NULL
             AND NOT EXISTS (
               SELECT 1 FROM computers c
                WHERE c.id = p.computer_id AND c.kind <> 'cloud' AND c.revoked_at IS NULL
@@ -3294,6 +3296,7 @@ api.post('/agents/:id/rehire', async (req, res) => {
   await pool.query(
     `UPDATE participants
         SET departed_at = NULL,
+            execution_enabled = CASE WHEN execution_kind = 'external-service' THEN FALSE ELSE execution_enabled END,
             status = 'avail',
             status_updated_at = NOW()
       WHERE id = $1 AND company_id = $2`,
@@ -3854,6 +3857,7 @@ api.get('/conversations/:id/messages', async (req, res) => {
           m.author_id AS "authorId", m.kind, m.body, m.sequence,
           m.client_id AS "clientId",
           m.tool, m.attachment, m.poll,
+          m.external_result AS "externalResult",
           -- Per-option vote tallies for polls. Empty array for non-poll
           -- rows. voterIds is sorted so the client can diff cheaply across
           -- successive WS poll.updated events.
@@ -4004,6 +4008,7 @@ api.get('/conversations/:id/messages', async (req, res) => {
         }
       }
     }
+    await getMemberAgent().attachStatuses(tenant, id, rows)
     res.json(rows)
   } catch (e) {
     // Don't bury HttpError under 500 — those carry real status codes
@@ -4012,6 +4017,13 @@ api.get('/conversations/:id/messages', async (req, res) => {
     console.error(`[messages] GET /conversations/${id}/messages failed`, e)
     res.status(500).json({ error: e instanceof Error ? e.message : String(e) })
   }
+})
+
+api.get('/external-deliveries/:id', async (req, res) => {
+  const { userId, companyId } = await requireCompany(req)
+  const result = await getMemberAgent().readDelivery(companyId, userId, req.params.id)
+  if (!result) { res.status(404).json({ error: 'delivery not found' }); return }
+  res.json(result)
 })
 
 api.post('/conversations/:id/messages', async (req, res) => {
@@ -4158,6 +4170,7 @@ api.post('/conversations/:id/messages', async (req, res) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    const lockedParticipantIds = await lockMessageParticipants(client, tenant, id, me)
     // Final write authorization is transactional. Locking the actor before
     // the conversation matches membership mutation lock order, so a kick,
     // offboard, or tenant move either happens before this write (and rejects
@@ -4245,6 +4258,7 @@ api.post('/conversations/:id/messages', async (req, res) => {
     if (!persisted) throw new Error('message insert returned no row')
     insertedNew = Boolean(inserted.rows[0])
     if (insertedNew) {
+      const externalDeliveries = await getMemberAgent().acceptMessage(client, persisted.id, lockedParticipantIds)
       await client.query(
         `UPDATE conversations SET updated_at = NOW() WHERE id = $1 AND company_id = $2`,
         [id, tenant],
@@ -4260,6 +4274,7 @@ api.post('/conversations/:id/messages', async (req, res) => {
           quotedMessageId: resolvedQuotedId ?? undefined,
           quoted: quotedSummary ?? undefined,
           clientId: clientId ?? undefined,
+          externalDeliveries,
         },
       })
     }
@@ -4869,6 +4884,7 @@ api.get('/conversations/:id/messages/:rootId/replies', async (req, res) => {
               ) pv
           ), '[]'::jsonb) AS "pollTallies",
           m.quoted_message_id AS "quotedMessageId",
+          m.external_result AS "externalResult",
           m.created_at AS "createdAt",
           -- mine is derived on the renderer from users; see the main
           -- /messages handler for the rationale.
@@ -4922,6 +4938,7 @@ api.get('/conversations/:id/messages/:rootId/replies', async (req, res) => {
         )
       }
     }
+    await getMemberAgent().attachStatuses(tenant, id, rows)
     res.json(rows)
   } catch (e) {
     // Don't bury HttpError under 500 — those carry real status codes

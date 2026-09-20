@@ -87,6 +87,7 @@ export async function wakeKanbanAgents(args: {
     const { rows } = await pool.query<{ id: string }>(
       `SELECT id FROM participants
         WHERE kind = 'agent'
+          AND execution_kind = 'native' AND execution_enabled
           AND company_id = $1
           AND id = ANY($2::text[])
           AND departed_at IS NULL`,

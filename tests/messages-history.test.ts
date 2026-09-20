@@ -183,3 +183,23 @@ describe('message history after reconnect', () => {
     assert.equal(store.getState().firstItemIndex.chat, anchor - 80)
   })
 })
+
+it('external status survives stale source replay and history refresh without duplicating the reply', async () => {
+  const { store, api } = setup(1, [])
+  const queued = { id:'delivery', memberId:'external', sourceMessageId:'m-1', status:'queued' as const,
+    reason:null, invocationId:null, finalMessageId:null, textOnly:true, expired:false, revision:0 }
+  const source: ApiMessage = { ...messages(1,1)[0], externalDeliveries:[queued] }
+  api.getMessages = async () => [source]
+  await store.getState().loadConversation('chat')
+  const completed = { ...queued, status:'completed' as const, invocationId:'invocation', finalMessageId:'m-2', revision:2 }
+  store.getState().applyEvent({type:'external.delivery',conversationId:'chat',delivery:completed})
+  store.getState().applyEvent({type:'external.delivery',conversationId:'chat',delivery:{...queued,status:'running',revision:1}})
+  store.getState().applyEvent({type:'message.new',conversationId:'chat',message:source})
+  await store.getState().reloadConversation('chat')
+  assert.deepEqual(store.getState().byConvo.chat[0].externalDeliveries,[completed])
+  const reply: ApiMessage = { ...messages(2,2)[0], body:'complete answer', externalResult:{deliveryId:'delivery',invocationId:'invocation',citations:[],citationStatus:'none'} }
+  store.getState().applyEvent({type:'message.new',conversationId:'chat',message:reply})
+  store.getState().applyEvent({type:'message.new',conversationId:'chat',message:reply})
+  assert.equal(store.getState().byConvo.chat.filter(m=>m.id==='m-2').length,1)
+  assert.equal(store.getState().byConvo.chat[1].body,'complete answer')
+})

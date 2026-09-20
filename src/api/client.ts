@@ -1105,6 +1105,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ id: participantId }),
     }),
+  getExternalDelivery: (id: string) => http<{
+    status: string; reason?: string; expired?: boolean; answer?: string
+    presentation?: Omit<NonNullable<Message['externalResult']>, 'deliveryId' | 'invocationId'> & { body: string }
+  }>(`/external-deliveries/${encodeURIComponent(id)}`),
   getMessages: (
     conversationId: string,
     opts?: { before?: number; limit?: number },
@@ -1529,6 +1533,7 @@ export interface CalendarEventInput {
 export type WsEvent =
   | { type: 'hello'; instanceId: string; ts: number }
   | { type: 'message.new'; conversationId: string; message: ApiMessage }
+  | { type: 'external.delivery'; conversationId: string; delivery: NonNullable<Message['externalDeliveries']>[number] }
   | { type: 'message.delta'; conversationId: string; messageId: string; authorId: string; delta: string; sequence: number; done: boolean }
   | { type: 'typing'; conversationId: string; agentId: string; done: boolean }
   | { type: 'participants.status'; participantId: string; status: Status; statusUpdatedAt?: string }

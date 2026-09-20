@@ -1,3 +1,5 @@
+import { agentExecutionChecksum } from '../db/migrations/0011-agent-execution.js'
+import { externalMessageDeliveriesChecksum } from '../db/migrations/0012-external-message-deliveries.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { QueryResult, QueryResultRow } from 'pg'
@@ -60,6 +62,22 @@ test('the agent provider profile migration matches its immutable manifest checks
 
 test('the agent routing claims migration matches its immutable manifest checksum', () => {
   assert.equal(agentRoutingClaimsChecksum(), SCHEMA_MIGRATIONS[8].checksum)
+})
+
+test('the external invocation migration is immutable and required before running this build', async () => {
+  const { externalInvocationsChecksum } = await import('../db/migrations/0010-external-invocations.js')
+  assert.equal(externalInvocationsChecksum(), SCHEMA_MIGRATIONS[9].checksum)
+  assert.throws(() => validateMigrationHistory(current().slice(0, 9)), MigrationHistoryError)
+})
+
+test('execution ownership migration is immutable and required before native execution', async () => {
+  assert.equal(agentExecutionChecksum(), SCHEMA_MIGRATIONS[10].checksum)
+  assert.throws(() => validateMigrationHistory(current().slice(0, 10)), MigrationHistoryError)
+})
+
+test('chat deliveries require the immutable migration before admission', () => {
+  assert.equal(externalMessageDeliveriesChecksum(), SCHEMA_MIGRATIONS[11].checksum)
+  assert.throws(() => validateMigrationHistory(current().slice(0, 11)), MigrationHistoryError)
 })
 
 test('the migration owner accepts an exact prefix and reports its pending suffix', () => {

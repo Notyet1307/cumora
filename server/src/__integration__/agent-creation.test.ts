@@ -2,6 +2,7 @@ import { after, before, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { pool } from '../db/pool.js'
 import { AgentCreationError, createAgentRecord } from '../agents/create.js'
+import { resolveExecution } from '../agents/execution.js'
 import { ensureSchemaOnce, resetAllTables, seedUserMembership, teardownAll } from './_helpers.js'
 
 const COMPANY_ID = 'co-agent-create'
@@ -125,4 +126,18 @@ test('[integration] reusing a request id with different data is rejected', async
     [COMPANY_ID],
   )
   assert.equal(rows[0]?.count, 1)
+})
+
+test('[integration] external registration is disabled from creation and request IDs cannot change ownership', async () => {
+  const request = input({ computerId: null, engine: undefined, executionKind: 'external-service' })
+  const first = await createAgentRecord(request)
+  const actor = { companyId: COMPANY_ID, subjectId: first.id }
+  assert.deepEqual(await resolveExecution(actor), { kind: 'denied', code: 'disabled' })
+  assert.equal((await createAgentRecord(request)).id, first.id)
+  await assert.rejects(createAgentRecord({ ...request, executionKind: 'native' }),
+    (error: unknown) => error instanceof AgentCreationError && error.status === 409)
+  await assert.rejects(createAgentRecord(input({ executionKind: 'external-service', requestId: 'external-with-placement' })),
+    (error: unknown) => error instanceof AgentCreationError && error.status === 400)
+  await assert.rejects(createAgentRecord({ ...request, requestId: 'external-over-quota', maxActiveAgents: 1 }),
+    (error: unknown) => error instanceof AgentCreationError && error.status === 403)
 })

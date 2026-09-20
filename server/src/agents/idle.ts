@@ -68,6 +68,7 @@ async function pickAgent(companyId: string): Promise<IdleCandidate | null> {
        SELECT p.id, p.name, p.role, p.status, p.company_id
          FROM participants p
         WHERE p.kind = 'agent'
+          AND p.execution_kind = 'native' AND p.execution_enabled
           AND p.departed_at IS NULL
           AND p.company_id = $1
           AND p.status IN ('avail', 'resting')

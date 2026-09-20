@@ -11,6 +11,7 @@
 
 import { pool } from '../db/pool.js'
 import type { PoolClient } from 'pg'
+import { persistReply } from '../message-persistence.js'
 import { storage, freshenAttachmentUrl, type StoredAttachment } from '../storage.js'
 import { env } from '../env.js'
 import type { CliResult, CliSideEffect } from './cli-result.js'
@@ -35,7 +36,6 @@ import {
   CH_CALENDAR_EVENTS,
   CH_CONVO_UPDATED,
   CH_DOCS,
-  CH_MESSAGE_NEW,
   CH_STATUS,
 } from '../redis.js'
 
@@ -2411,43 +2411,12 @@ async function cmdReply(parsed: ParsedArgs): Promise<CliResult> {
         }
       }
     }
-    await txClient.query(
-      `INSERT INTO messages (id, conversation_id, author_id, kind, body, sequence, attachment, quoted_message_id, company_id)
-       VALUES ($1,$2,$3,'text',$4,$5,$6::jsonb,$7,$8)`,
-      [messageId, convoId, me, finalBody, sequence, attachment ? JSON.stringify(attachment) : null, resolvedQuotedId, companyId],
-    )
-    await txClient.query(`UPDATE conversations SET updated_at = NOW() WHERE id = $1`, [convoId])
-    await txClient.query(
-      `INSERT INTO conversation_reads (user_id, conversation_id, last_read_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (user_id, conversation_id) DO UPDATE SET last_read_at = NOW()`,
-      [me, convoId],
-    )
-    await enqueueBroadcast(txClient, CH_MESSAGE_NEW, {
-      type: 'message.new',
-      conversationId: convoId,
-      companyId,
-      message: {
-        id: messageId,
-        conversationId: convoId,
-        authorId: me,
-        kind: 'text',
-        body: finalBody,
-        sequence,
-        at: new Date().toISOString(),
-        attachment: attachment ?? undefined,
-        quotedMessageId: resolvedQuotedId ?? undefined,
-        quoted: quotedSummary
-          ? {
-              id: quotedSummary.id,
-              authorId: quotedSummary.authorId,
-              authorName: quotedSummary.authorName,
-              kind: 'text',
-              body: quotedSummary.body,
-              sequence: quotedSummary.sequence,
-            }
-          : undefined,
-      },
+    await persistReply(txClient, companyId, {
+      id: messageId, conversationId: convoId, authorId: me, kind: 'text', body: finalBody,
+      sequence, at: new Date().toISOString(), attachment: attachment ?? undefined,
+      quotedMessageId: resolvedQuotedId ?? undefined,
+      quoted: quotedSummary ? { id: quotedSummary.id, authorId: quotedSummary.authorId,
+        authorName: quotedSummary.authorName, kind: 'text', body: quotedSummary.body, sequence: quotedSummary.sequence } : undefined,
     })
     await txClient.query('COMMIT')
     nudgeRealtimeOutbox()

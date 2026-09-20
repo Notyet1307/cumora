@@ -43,6 +43,7 @@ async function appendTranscript(args: {
         `SELECT id FROM participants
           WHERE id = $1 AND company_id = $2
             AND kind = 'agent' AND departed_at IS NULL
+            AND execution_kind = 'native' AND execution_enabled
           FOR SHARE`,
         [args.authorId, initial.company_id],
       )
@@ -223,6 +224,7 @@ async function orchestrate(args: {
          JOIN participants p
            ON p.id = cm.participant_id AND p.company_id = cm.company_id
           AND p.kind = 'agent' AND p.departed_at IS NULL
+          AND p.execution_kind = 'native' AND p.execution_enabled
         WHERE c.id = $1 AND c.company_id = $2
         ORDER BY p.id`,
       [session.conversation_id, companyId],
@@ -320,6 +322,7 @@ async function loadAuthorizedTurnSnapshot(args: {
       `SELECT id FROM participants
         WHERE id = $1 AND company_id = $2
           AND kind = 'agent' AND departed_at IS NULL
+          AND execution_kind = 'native' AND execution_enabled
         FOR SHARE`,
       [args.agentId, args.companyId],
     )

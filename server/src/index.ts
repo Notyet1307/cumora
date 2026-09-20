@@ -36,10 +36,17 @@ import { notifyAlert } from './alerting.js'
 import { startShippingMaintenance } from './shipping-maintenance.js'
 import { startRealtimeOutboxWorker, stopRealtimeOutboxWorker } from './realtime-outbox.js'
 import { startWorkspaceCleanupWorker, stopWorkspaceCleanupWorker } from './workspace-cleanup.js'
+import { getMemberAgent, installMemberAgent, MemberAgent } from './integrations/member-agent.js'
+import { loadMemberAgentBindings } from './integrations/member-agent-config.js'
 
 async function main() {
   const schemaVersion = await verifySchemaWithBootRetry()
   console.log(`[boot] schema version ${schemaVersion} is compatible`)
+  try {
+    installMemberAgent(new MemberAgent(pool, loadMemberAgentBindings(process.env.CUMORA_EXTERNAL_AGENT_CONFIG)))
+  } catch {
+    console.error('[boot] external agent snapshot unavailable; native behavior unchanged')
+  }
   await seedIfEmpty()
   // Promote CUMORA_ADMIN_EMAILS members to is_admin on every boot —
   // idempotent, only flips FALSE→TRUE. Demotion goes through the panel.
@@ -320,6 +327,7 @@ async function main() {
   // commit. Start after the schema ensure so the outbox table is guaranteed.
   startRealtimeOutboxWorker()
   startWorkspaceCleanupWorker()
+  getMemberAgent().start()
 
   // Agent-pod garbage collection — sweep Succeeded/Failed/Unknown
   // agent pods older than 5min. Plain Pods don't have TTL-after-
@@ -379,6 +387,7 @@ async function main() {
   const shutdown = async (sig: string) => {
     console.log(`[shutdown] ${sig}`)
     server.close()
+    await getMemberAgent().stop()
     stopRealtimeOutboxWorker()
     stopWorkspaceCleanupWorker()
     try { await pool.end() } catch { /* ignore */ }

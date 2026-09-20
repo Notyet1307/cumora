@@ -28,9 +28,26 @@ interface BindingBase {
   enabled: boolean
 }
 
+/** Operator attestation of the effective remote configuration, not model input. */
+export interface AgentApproval {
+  authorizationVersion: string
+  tenantId: string
+  effectiveConfigDigest: string
+  mode: 'smart-reasoning'
+  allowedTools: string[]
+  credentialCapability: 'chat'
+  kbSelectionMode: 'selected'
+  retrieveKbOnlyWhenMentioned: false
+  mcpSelectionMode: 'none' | 'all'
+  mcpEnabledServiceIds?: string[]
+  skillsSelectionMode: 'none'
+  sandboxEnabled: false
+  memoryEnabled: false
+}
+
 export type IntegrationBinding = BindingBase & (
   | { kind: 'tool'; capabilityId: 'weknora.search'; knowledgeBaseId: string }
-  | { kind: 'agent-service'; capabilityId: 'weknora.agent'; remoteAgentId: string }
+  | { kind: 'agent-service'; capabilityId: 'weknora.agent'; remoteAgentId: string; approval?: AgentApproval }
 )
 
 export interface BindingConfig {
@@ -56,8 +73,14 @@ export interface ResolvedSearchBinding {
   readonly knowledgeBaseId: string
 }
 
-export type BindingResolution =
-  | { ok: true; binding: ResolvedSearchBinding }
+export interface ResolvedAgentBinding extends Omit<ResolvedSearchBinding, 'knowledgeBaseId'> {
+  readonly remoteAgentId: string
+  readonly knowledgeBaseIds: readonly string[]
+  readonly approval: Readonly<Omit<AgentApproval, 'allowedTools' | 'mcpEnabledServiceIds'> & { allowedTools: readonly string[]; mcpEnabledServiceIds?: readonly string[] }>
+}
+
+export type BindingResolution<T = ResolvedSearchBinding> =
+  | { ok: true; binding: T }
   | { ok: false; code: BindingDenialCode }
 
 export class BindingConfigError extends Error {
@@ -123,16 +146,45 @@ export class BindingResolver {
         && typeof b.enabled === 'boolean' && strings(b.companyIds) && strings(b.subjectIds))
       requireConfig((b.kind === 'tool' && b.capabilityId === 'weknora.search' && nonempty(b.knowledgeBaseId))
         || (b.kind === 'agent-service' && b.capabilityId === 'weknora.agent' && nonempty(b.remoteAgentId)))
+      let approvalIdentity: unknown = null
+      if (b.kind === 'agent-service' && b.approval) {
+        const a = b.approval
+        const c = config.connections.find(item => item.id === b.connectionId)
+        requireConfig(a.mode === 'smart-reasoning' && a.credentialCapability === 'chat'
+          && nonempty(a.authorizationVersion) && nonempty(a.tenantId) && /^[a-f0-9]{64}$/.test(a.effectiveConfigDigest)
+          && strings(a.allowedTools) && a.allowedTools.length > 0
+          && a.allowedTools.every(tool => ['knowledge_search', 'grep_chunks', 'list_knowledge_chunks', 'query_knowledge_graph', 'get_document_info'].includes(tool))
+          && a.kbSelectionMode === 'selected' && a.retrieveKbOnlyWhenMentioned === false
+          && (a.mcpSelectionMode === 'none' || a.mcpSelectionMode === 'all')
+          && (Object.hasOwn(a, 'mcpEnabledServiceIds')
+            ? Array.isArray(a.mcpEnabledServiceIds) && a.mcpEnabledServiceIds.length === 0
+            : a.mcpSelectionMode === 'none')
+          && a.skillsSelectionMode === 'none' && a.sandboxEnabled === false && a.memoryEnabled === false
+          && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(b.remoteAgentId))
+        if (c) {
+          const url = new URL(c.baseUrl)
+          requireConfig(['127.0.0.1', '[::1]'].includes(url.hostname) && url.pathname === '/api/v1'
+            && c.knowledgeBaseIds.length > 0
+            && !config.connections.some(other => other.kind === 'tool' && other.secretRef === c.secretRef))
+        }
+        // Field insertion order and tool-set order are not authorization changes.
+        approvalIdentity = [a.authorizationVersion, a.tenantId, a.effectiveConfigDigest, a.mode,
+          [...new Set(a.allowedTools)].sort(), a.credentialCapability, a.kbSelectionMode,
+          a.retrieveKbOnlyWhenMentioned, a.mcpSelectionMode, a.mcpEnabledServiceIds ?? null,
+          a.skillsSelectionMode, a.sandboxEnabled, a.memoryEnabled]
+      }
       remember('binding', b.id, b.version, [b.kind, b.capabilityId, b.connectionId, b.connectionVersion,
-        [...b.companyIds].sort(), [...b.subjectIds].sort(), b.enabled, b.kind === 'tool' ? b.knowledgeBaseId : b.remoteAgentId])
+        [...b.companyIds].sort(), [...b.subjectIds].sort(), b.enabled, b.kind === 'tool' ? b.knowledgeBaseId : [b.remoteAgentId, approvalIdentity]])
     }
     this.#config = structuredClone(config)
     this.#secrets = { ...secrets }
     if (previous) previous.#retired = true
   }
 
-  resolve(actor: BindingActor, capabilityId: CapabilityId, kind: CapabilityKind): BindingResolution {
-    const deny = (code: BindingDenialCode): BindingResolution => ({ ok: false, code })
+  resolve(actor: BindingActor, capabilityId: 'weknora.search', kind: CapabilityKind): BindingResolution
+  resolve(actor: BindingActor, capabilityId: 'weknora.agent', kind: CapabilityKind): BindingResolution<ResolvedAgentBinding>
+  resolve(actor: BindingActor, capabilityId: CapabilityId, kind: CapabilityKind): BindingResolution<ResolvedSearchBinding | ResolvedAgentBinding> {
+    const deny = (code: BindingDenialCode): BindingResolution<never> => ({ ok: false, code })
     if (this.#retired) return deny('version_conflict')
     if (!actor.companyId || !actor.subjectId) return deny('invalid_actor')
     const candidates = this.#config.bindings.filter((binding) => binding.capabilityId === capabilityId)
@@ -148,10 +200,19 @@ export class BindingResolver {
     if (!binding.enabled || !connection.enabled) return deny('disabled')
     if (binding.kind !== kind || connection.kind !== kind) return deny('kind_mismatch')
     if (binding.connectionVersion !== connection.version) return deny('version_conflict')
-    if (binding.kind === 'agent-service') return deny('unavailable')
-    if (!connection.knowledgeBaseIds.includes(binding.knowledgeBaseId)) return deny('scope_denied')
+    if (binding.kind === 'agent-service' && !binding.approval) return deny('unavailable')
+    if (binding.kind === 'tool' && !connection.knowledgeBaseIds.includes(binding.knowledgeBaseId)) return deny('scope_denied')
     const apiKey = Object.hasOwn(this.#secrets, connection.secretRef) ? this.#secrets[connection.secretRef] : undefined
     if (!nonempty(apiKey)) return deny('missing_secret')
+    if (binding.kind === 'agent-service' && binding.approval) return { ok: true, binding: Object.freeze({
+      id: binding.id, version: binding.version, connectionId: connection.id, connectionVersion: connection.version,
+      baseUrl: connection.baseUrl, apiKey, remoteAgentId: binding.remoteAgentId,
+      knowledgeBaseIds: Object.freeze([...connection.knowledgeBaseIds]),
+      approval: Object.freeze({ ...binding.approval, allowedTools: Object.freeze([...binding.approval.allowedTools]),
+        ...(binding.approval.mcpEnabledServiceIds ? { mcpEnabledServiceIds: Object.freeze([...binding.approval.mcpEnabledServiceIds]) } : {}),
+      }),
+    }) }
+    if (binding.kind !== 'tool') return deny('unavailable')
     return { ok: true, binding: Object.freeze({
       id: binding.id, version: binding.version,
       connectionId: connection.id, connectionVersion: connection.version,

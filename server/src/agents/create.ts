@@ -24,6 +24,8 @@ export interface CreateAgentRecordInput {
   tier: 'free' | 'pro' | 'max'
   maxActiveAgents: number
   requestId?: string | null
+  /** Trusted internal registration only. Public creation remains native. */
+  executionKind?: 'native' | 'external-service'
   name: string
   role?: string
   systemPrompt: string
@@ -96,6 +98,7 @@ function creationRequestHash(input: CreateAgentRecordInput): string {
     fastModel: input.fastModel ?? null,
     ...(input.providerProfile ? { providerProfile: input.providerProfile } : {}),
     tools: input.tools ?? ['bash'],
+    ...(input.executionKind === 'external-service' ? { executionKind: input.executionKind } : {}),
     computerId: input.computerId ?? null,
     engine: input.engine ?? null,
     inherit: input.inherit === true,
@@ -115,6 +118,11 @@ function creationRequestHash(input: CreateAgentRecordInput): string {
 export async function createAgentRecord(
   input: CreateAgentRecordInput,
 ): Promise<CreateAgentRecordResult> {
+  const executionKind = input.executionKind ?? 'native'
+  if (executionKind !== 'native' && executionKind !== 'external-service') throw new AgentCreationError(400, 'invalid execution kind')
+  if (executionKind === 'external-service' && (input.computerId || input.engine || input.providerProfile)) {
+    throw new AgentCreationError(400, 'external members cannot have native placement')
+  }
   const requestId = normalizeRequestId(input.requestId)
   const requestHash = requestId ? creationRequestHash(input) : null
   const client = await pool.connect()
@@ -205,10 +213,10 @@ export async function createAgentRecord(
         `INSERT INTO participants
            (id, kind, name, role, initial, avatar_bg, status, bio, tools,
             system_prompt, model, fast_model, company_id, computer_id, engine,
-            engine_inherit, creation_request_id, creation_request_hash, provider_profile)
+            engine_inherit, creation_request_id, creation_request_hash, provider_profile, execution_kind, execution_enabled)
          VALUES
            ($1, 'agent', $2, $3, $4, $5, 'avail', $6, $7::jsonb,
-            $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
          ON CONFLICT DO NOTHING
          RETURNING id`,
         [
@@ -217,6 +225,7 @@ export async function createAgentRecord(
           input.fastModel ?? null, input.companyId, computerId,
           placement?.engine ?? null, placement?.inherit ?? true,
           requestId, requestHash, input.providerProfile ?? null,
+          executionKind, executionKind === 'native',
         ],
       )
       if (rows[0]) {

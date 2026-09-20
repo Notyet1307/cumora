@@ -48,6 +48,8 @@ const inprocBusyHeartbeatFailures = new Map<string, number>()
 const INPROC_BUSY_HEARTBEAT_ALERT_THRESHOLD = 5
 import { companyIdForConversation } from '../../tenant.js'
 import { getPersona } from '../personas.js'
+import { isNativeExecution } from '../execution.js'
+import type { ExecutionRow } from '../execution.js'
 import {
   setStatus as setStatusImpl,
   heartbeatStatus as heartbeatStatusImpl,
@@ -126,8 +128,13 @@ function toMemoryRow(r: MemoryQueryRow): MemoryRow {
 
 export class InProcRuntimeClient implements AgentRuntimeClient {
   /** Persona row (delegates to the cached personas.ts helper).
-   *  Returns null when the id isn't an active agent. */
+   *  Checks uncached native authorization before reading the persona cache. */
   async loadPersona(agentId: string): Promise<PersonaRow | null> {
+    const { rows } = await pool.query<Pick<ExecutionRow, 'execution_kind' | 'execution_enabled'>>(
+      `SELECT execution_kind, execution_enabled FROM participants
+        WHERE id=$1 AND kind='agent' AND departed_at IS NULL`, [agentId],
+    )
+    if (!rows[0] || !isNativeExecution(rows[0])) return null
     return getPersona(agentId)
   }
 
@@ -144,6 +151,7 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
          SELECT company_id
            FROM participants
           WHERE id = $1 AND kind = 'agent' AND departed_at IS NULL
+            AND execution_kind = 'native' AND execution_enabled
        ),
        convos AS (
          SELECT c.id, c.company_id,
@@ -401,6 +409,7 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
              ON requesting_agent.id = $1
             AND requesting_agent.company_id = $2
             AND requesting_agent.kind = 'agent'
+            AND requesting_agent.execution_kind = 'native' AND requesting_agent.execution_enabled
             AND requesting_agent.departed_at IS NULL
            LEFT JOIN projects pr ON pr.id = c.project_id
            JOIN LATERAL (
@@ -648,6 +657,7 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
         `SELECT id FROM participants
           WHERE id = $1 AND company_id = $2
             AND kind = 'agent' AND departed_at IS NULL
+            AND execution_kind = 'native' AND execution_enabled
           FOR SHARE`,
         [args.agentId, companyId],
       )
@@ -1066,6 +1076,7 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
              JOIN participants p
                ON p.id = $2 AND p.company_id = c.company_id
               AND p.kind = 'agent' AND p.departed_at IS NULL
+              AND p.execution_kind = 'native' AND p.execution_enabled
             WHERE m.id = $1 AND m.conversation_id = $3
               AND ($4::text IS NULL OR c.company_id = $4)
               AND (

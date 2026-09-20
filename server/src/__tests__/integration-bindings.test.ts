@@ -149,3 +149,84 @@ test('two retrieval connections in one snapshot cannot exchange tenant scopes or
   assert.deepEqual([b.binding.baseUrl, b.binding.knowledgeBaseId, b.binding.apiKey], ['http://b.test/api/v1', 'kb-b', 'fake-b'])
   assert.deepEqual(resolver.resolve({ ...actor, companyId: 'co-c' }, 'weknora.search', 'tool'), { ok: false, code: 'company_denied' })
 })
+
+test('an approved local Agent grants only its fixed scope and revocation fences subsequent use', () => {
+  const candidate = config()
+  candidate.connections[0] = { ...candidate.connections[0], kind: 'agent-service', baseUrl: 'http://127.0.0.1:8180/api/v1' }
+  candidate.bindings[0] = { ...candidate.bindings[0], kind: 'agent-service', capabilityId: 'weknora.agent', remoteAgentId: '11111111-1111-4111-8111-111111111111',
+    approval: { authorizationVersion: 'a1', tenantId: '1', effectiveConfigDigest: 'a'.repeat(64), mode: 'smart-reasoning', allowedTools: ['knowledge_search'], credentialCapability: 'chat', kbSelectionMode: 'selected', retrieveKbOnlyWhenMentioned: false, mcpSelectionMode: 'none', skillsSelectionMode: 'none', sandboxEnabled: false, memoryEnabled: false } }
+  const first = new BindingResolver(candidate, { key: 'chat-only-secret' })
+  const result = first.resolve(actor, 'weknora.agent', 'agent-service')
+  assert.ok(result.ok)
+  assert.equal(result.binding.remoteAgentId, '11111111-1111-4111-8111-111111111111')
+  assert.deepEqual(result.binding.knowledgeBaseIds, ['kb-a'])
+  for (const patch of [{ allowedTools: [] }, { allowedTools: ['execute_code'] }, { memoryEnabled: true }, { mcpSelectionMode: 'all' }]) {
+    const unsafe = structuredClone(candidate)
+    if (unsafe.bindings[0].kind === 'agent-service') Object.assign(unsafe.bindings[0].approval!, patch)
+    assert.throws(() => new BindingResolver(unsafe, { key: 'chat-only-secret' }), BindingConfigError)
+  }
+  candidate.bindings[0].enabled = false
+  candidate.bindings[0].version = '2'
+  const revoked = new BindingResolver(candidate, { key: 'chat-only-secret' }, first)
+  assert.deepEqual(first.resolve(actor, 'weknora.agent', 'agent-service'), { ok: false, code: 'version_conflict' })
+  assert.deepEqual(revoked.resolve(actor, 'weknora.agent', 'agent-service'), { ok: false, code: 'disabled' })
+  candidate.connections[0].baseUrl = 'http://169.254.169.254/api/v1'
+  assert.throws(() => new BindingResolver(candidate, { key: 'chat-only-secret' }), BindingConfigError)
+})
+
+test('all MCP selection requires immutable evidence that no services are enabled', () => {
+  const candidate = config()
+  candidate.connections[0] = { ...candidate.connections[0], kind: 'agent-service', baseUrl: 'http://127.0.0.1:8180/api/v1' }
+  const enabledServices: string[] = []
+  candidate.bindings[0] = { ...candidate.bindings[0], kind: 'agent-service', capabilityId: 'weknora.agent', remoteAgentId: '11111111-1111-4111-8111-111111111111',
+    approval: { authorizationVersion: 'a1', tenantId: '1', effectiveConfigDigest: 'a'.repeat(64), mode: 'smart-reasoning', allowedTools: ['knowledge_search'], credentialCapability: 'chat', kbSelectionMode: 'selected', retrieveKbOnlyWhenMentioned: false, mcpSelectionMode: 'all', mcpEnabledServiceIds: enabledServices, skillsSelectionMode: 'none', sandboxEnabled: false, memoryEnabled: false } }
+  const first = new BindingResolver(candidate, { key: 'chat-secret' })
+  for (const mcpSelectionMode of ['all', 'none']) {
+    for (const evidence of [undefined, null, ['service-a'], '[]', { length: 0 }]) {
+      const unsafe = structuredClone(candidate)
+      if (unsafe.bindings[0].kind === 'agent-service') Object.assign(unsafe.bindings[0].approval!, { mcpSelectionMode, mcpEnabledServiceIds: evidence })
+      assert.throws(() => new BindingResolver(unsafe, { key: 'chat-secret' }), e => e instanceof BindingConfigError && e.code === 'invalid_config')
+    }
+  }
+  const missing = structuredClone(candidate)
+  if (missing.bindings[0].kind === 'agent-service') delete missing.bindings[0].approval!.mcpEnabledServiceIds
+  assert.throws(() => new BindingResolver(missing, { key: 'chat-secret' }), e => e instanceof BindingConfigError && e.code === 'invalid_config')
+  enabledServices.push('service-added-after-approval')
+  const result = first.resolve(actor, 'weknora.agent', 'agent-service')
+  assert.ok(result.ok)
+  assert.equal(result.binding.approval.mcpSelectionMode, 'all')
+  assert.deepEqual(result.binding.approval.mcpEnabledServiceIds, [])
+  assert.throws(() => { Object.assign(result.binding.approval.mcpEnabledServiceIds!, { 0: 'service-a' }) }, TypeError)
+})
+
+test('equivalent approval property and tool-set order preserve version identity, actual grant changes conflict', () => {
+  const candidate = config()
+  candidate.connections[0] = { ...candidate.connections[0], kind: 'agent-service', baseUrl: 'http://127.0.0.1:8180/api/v1' }
+  const approval = { authorizationVersion: 'a1', tenantId: '1', effectiveConfigDigest: 'a'.repeat(64), mode: 'smart-reasoning' as const,
+    allowedTools: ['knowledge_search', 'grep_chunks'], credentialCapability: 'chat' as const, kbSelectionMode: 'selected' as const,
+    retrieveKbOnlyWhenMentioned: false as const, mcpSelectionMode: 'none' as const, skillsSelectionMode: 'none' as const, sandboxEnabled: false as const, memoryEnabled: false as const }
+  candidate.bindings[0] = { ...candidate.bindings[0], kind: 'agent-service', capabilityId: 'weknora.agent', remoteAgentId: '11111111-1111-4111-8111-111111111111', approval }
+  for (const variant of ['properties', 'tools', 'duplicate-tool']) {
+    const first = new BindingResolver(candidate, { key: 'chat-secret' })
+    const equivalent = structuredClone(candidate)
+    const grant = equivalent.bindings[0]
+    assert.equal(grant.kind, 'agent-service')
+    if (grant.kind !== 'agent-service' || !grant.approval) throw new Error('invalid test grant')
+    if (variant === 'properties') grant.approval = Object.fromEntries(Object.entries(grant.approval).reverse()) as typeof approval
+    else if (variant === 'tools') grant.approval.allowedTools.reverse()
+    else grant.approval.allowedTools.push('knowledge_search')
+    const successor = new BindingResolver(equivalent, { key: 'chat-secret' }, first)
+    const allowed = successor.resolve(actor, 'weknora.agent', 'agent-service')
+    assert.ok(allowed.ok)
+    assert.equal(allowed.binding.remoteAgentId, '11111111-1111-4111-8111-111111111111')
+    assert.deepEqual(first.resolve(actor, 'weknora.agent', 'agent-service'), { ok: false, code: 'version_conflict' })
+  }
+  for (const changed of [{ tenantId: '2' }, { authorizationVersion: 'a2' }, { effectiveConfigDigest: 'b'.repeat(64) }, { allowedTools: ['knowledge_search'] }, { mcpEnabledServiceIds: [] }, { mcpSelectionMode: 'all', mcpEnabledServiceIds: [] }]) {
+    const first = new BindingResolver(candidate, { key: 'chat-secret' })
+    const different = structuredClone(candidate)
+    const grant = different.bindings[0]
+    if (grant.kind === 'agent-service') Object.assign(grant.approval!, changed)
+    assert.throws(() => new BindingResolver(different, { key: 'chat-secret' }, first), e => e instanceof BindingConfigError && e.code === 'version_conflict')
+    assert.ok(first.resolve(actor, 'weknora.agent', 'agent-service').ok)
+  }
+})
