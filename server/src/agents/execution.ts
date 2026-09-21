@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg'
 import { pool } from '../db/pool.js'
-import type { BindingActor, BindingResolver, ResolvedAgentBinding } from '../integrations/bindings.js'
+import type { BindingActor, BindingResolver, ResolvedExternalAgentBinding } from '../integrations/bindings.js'
 
 export interface ExecutionRow {
   company_id: string
@@ -22,7 +22,7 @@ export type ExecutionResolution =
   | { kind: 'external-service'; assignmentId: string; bindingId: string; bindingVersion: string; configDigest: string }
   | { kind: 'denied'; code: 'invalid_actor' | 'unavailable' | 'disabled' | 'binding_denied' | 'assignment_changed' }
 
-function matchesBinding(row: ExecutionRow, binding: ResolvedAgentBinding): boolean {
+function matchesBinding(row: ExecutionRow, binding: ResolvedExternalAgentBinding): boolean {
   return row.execution_binding_id === binding.id && row.execution_binding_version === binding.version
     && row.execution_config_digest === binding.approval.effectiveConfigDigest
 }
@@ -44,7 +44,7 @@ export async function resolveExecution(
     if (!row.execution_enabled) return { kind: 'denied', code: 'disabled' }
     if (isNativeExecution(row)) return { kind: 'native', assignmentId: row.runtime_assignment_id }
     if (row.execution_kind !== 'external-service' || !bindings) return { kind: 'denied', code: 'unavailable' }
-    const resolved = bindings.resolve(actor, 'weknora.agent', 'agent-service')
+    const resolved = bindings.resolveAgent(actor)
     if (!resolved.ok) return { kind: 'denied', code: 'binding_denied' }
     if (!matchesBinding(row, resolved.binding)) return { kind: 'denied', code: 'assignment_changed' }
     return { kind: 'external-service', assignmentId: row.runtime_assignment_id,
@@ -76,7 +76,7 @@ export async function configureExternalExecution(
     )
     const row = rows[0]
     if (!row || row.execution_kind !== 'external-service' || row.runtime_assignment_id !== input.assignmentId) throw new Error('execution_assignment_changed')
-    let binding: ResolvedAgentBinding | undefined
+    let binding: ResolvedExternalAgentBinding | undefined
     if (input.enabled) {
       const active = await tx.query(`SELECT 1 FROM external_invocations WHERE company_id=$1 AND subject_id=$2
         AND status IN ('queued','dispatching','running','unknown') LIMIT 1`, [actor.companyId, actor.subjectId])
@@ -84,7 +84,7 @@ export async function configureExternalExecution(
       const deliveries = await tx.query(`SELECT 1 FROM external_message_deliveries WHERE company_id=$1 AND member_id=$2
         AND status IN ('queued','running','blocked_unknown') LIMIT 1`, [actor.companyId, actor.subjectId])
       if (deliveries.rowCount) throw new Error('external_delivery_pending')
-      const selected = bindings?.resolve(actor, 'weknora.agent', 'agent-service')
+      const selected = bindings?.resolveAgent(actor)
       if (!selected?.ok) throw new Error('external_binding_unavailable')
       binding = selected.binding
       if (row.execution_enabled && !matchesBinding(row, binding)) throw new Error('disable_before_rebinding')

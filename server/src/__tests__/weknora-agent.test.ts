@@ -69,6 +69,7 @@ test('multi-data frames parse and headers-after body stalls are bounded without 
 })
 
 const binding: ResolvedAgentBinding = {
+  backend: 'weknora',
   id: 'agent', version: '1', connectionId: 'local', connectionVersion: '1', baseUrl: 'http://127.0.0.1:8180/api/v1', apiKey: 'secret"\\quoted',
   remoteAgentId: '11111111-1111-4111-8111-111111111111', knowledgeBaseIds: ['kb'],
   approval: { authorizationVersion: '1', tenantId: '1', effectiveConfigDigest: 'a'.repeat(64), mode: 'smart-reasoning', allowedTools: ['knowledge_search'], credentialCapability: 'chat', kbSelectionMode: 'selected', retrieveKbOnlyWhenMentioned: false, mcpSelectionMode: 'none', skillsSelectionMode: 'none', sandboxEnabled: false, memoryEnabled: false },

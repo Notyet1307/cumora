@@ -200,6 +200,19 @@ export class WeknoraAgentClient {
     finally { void reader.cancel().catch(() => {}); reader.releaseLock() }
   }
 
+  /** Read only the explicitly bound Agent's identity; this does not prove chat permission or configuration. */
+  async preflight(signal: AbortSignal): Promise<void> {
+    const binding = this.#binding
+    if (!id(binding.remoteAgentId)) throw new Error('invalid_remote_agent')
+    const value = await this.#json(await this.#request(`/agents/${encodeURIComponent(binding.remoteAgentId)}`, signal), signal)
+    const agent = object(value.data)
+    if (value.success !== true || agent?.id !== binding.remoteAgentId
+      || String(agent.tenant_id) !== binding.approval.tenantId
+      || JSON.stringify(value).includes(JSON.stringify(binding.apiKey).slice(1, -1))) throw new Error('remote_agent_metadata_rejected')
+    await this.#authorize()
+    signal.throwIfAborted()
+  }
+
   async createSession(signal: AbortSignal): Promise<string> {
     const response = await this.#request('/sessions', signal, { title: 'Cumora controlled probe', description: 'Synthetic operator probe' })
     const parsed = await this.#json(response, signal)

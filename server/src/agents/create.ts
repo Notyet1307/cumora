@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { PoolClient } from 'pg'
 import { pool } from '../db/pool.js'
 import {
   cloudComputerId,
@@ -117,6 +118,7 @@ function creationRequestHash(input: CreateAgentRecordInput): string {
  */
 export async function createAgentRecord(
   input: CreateAgentRecordInput,
+  transaction?: PoolClient,
 ): Promise<CreateAgentRecordResult> {
   const executionKind = input.executionKind ?? 'native'
   if (executionKind !== 'native' && executionKind !== 'external-service') throw new AgentCreationError(400, 'invalid execution kind')
@@ -125,9 +127,9 @@ export async function createAgentRecord(
   }
   const requestId = normalizeRequestId(input.requestId)
   const requestHash = requestId ? creationRequestHash(input) : null
-  const client = await pool.connect()
+  const client = transaction ?? await pool.connect()
   try {
-    await client.query('BEGIN')
+    if (!transaction) await client.query('BEGIN')
     const company = await client.query(
       'SELECT id FROM companies WHERE id = $1 FOR UPDATE',
       [input.companyId],
@@ -158,7 +160,7 @@ export async function createAgentRecord(
         if (existing.creation_request_hash !== requestHash) {
           throw new AgentCreationError(409, 'requestId was already used with different agent data')
         }
-        await client.query('COMMIT')
+        if (!transaction) await client.query('COMMIT')
         return {
           id: existing.id,
           created: false,
@@ -229,16 +231,16 @@ export async function createAgentRecord(
         ],
       )
       if (rows[0]) {
-        await client.query('COMMIT')
+        if (!transaction) await client.query('COMMIT')
         return { id: rows[0].id, created: true, placement }
       }
     }
 
     throw new AgentCreationError(500, 'could not pick a unique agent id — please retry')
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {})
+    if (!transaction) await client.query('ROLLBACK').catch(() => {})
     throw error
   } finally {
-    client.release()
+    if (!transaction) client.release()
   }
 }

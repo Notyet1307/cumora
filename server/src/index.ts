@@ -37,15 +37,24 @@ import { startShippingMaintenance } from './shipping-maintenance.js'
 import { startRealtimeOutboxWorker, stopRealtimeOutboxWorker } from './realtime-outbox.js'
 import { startWorkspaceCleanupWorker, stopWorkspaceCleanupWorker } from './workspace-cleanup.js'
 import { getMemberAgent, installMemberAgent, MemberAgent } from './integrations/member-agent.js'
-import { loadMemberAgentBindings } from './integrations/member-agent-config.js'
+import { getIntegrationManagement, installIntegrationManagement, IntegrationManagement } from './integrations/management.js'
+import { loadIntegrationTrust } from './integrations/integration-trust.js'
+import type { BindingProvider } from './integrations/bindings.js'
+import { installMcpTools, McpToolDispatcher } from './integrations/mcp-tools.js'
+import { resolveExecution } from './agents/execution.js'
 
 async function main() {
   const schemaVersion = await verifySchemaWithBootRetry()
   console.log(`[boot] schema version ${schemaVersion} is compatible`)
   try {
-    installMemberAgent(new MemberAgent(pool, loadMemberAgentBindings(process.env.CUMORA_EXTERNAL_AGENT_CONFIG)))
+    installIntegrationManagement(new IntegrationManagement(pool, await loadIntegrationTrust(process.env.CUMORA_INTEGRATION_TRUST_FILE)))
+    const bindings: BindingProvider = (actor, db) => getIntegrationManagement().resolver(actor, db)
+    installMemberAgent(new MemberAgent(pool, bindings))
+    installMcpTools(new McpToolDispatcher(bindings, async actor => {
+      if ((await resolveExecution(actor)).kind !== 'native') throw new Error('native_tool_actor_required')
+    }))
   } catch {
-    console.error('[boot] external agent snapshot unavailable; native behavior unchanged')
+    console.error('[boot] integration trust unavailable; managed integrations denied, native behavior unchanged')
   }
   await seedIfEmpty()
   // Promote CUMORA_ADMIN_EMAILS members to is_admin on every boot —

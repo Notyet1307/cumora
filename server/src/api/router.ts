@@ -9,6 +9,8 @@ import { pool } from '../db/pool.js'
 import { CH_MESSAGE_NEW, CH_REACTIONS, CH_CONVO_UPDATED, CH_DOCS, CH_TYPING, CH_CALENDAR_EVENTS, CH_BOARDS, CH_STATUS, CH_WORKSPACES, publish } from '../redis.js'
 import { enqueueBroadcast, nudgeRealtimeOutbox, withOutboxTransaction } from '../realtime-outbox.js'
 import { getMemberAgent, lockMessageParticipants } from '../integrations/member-agent.js'
+import { createExternalArtifactRouter } from './external-artifact-router.js'
+import { createIntegrationRouter } from './integration-router.js'
 import { enqueueWorkspaceCleanup, nudgeWorkspaceCleanupWorker } from '../workspace-cleanup.js'
 import { collectDocumentStorageKeys, evictDocumentRoom } from '../documents/rooms.js'
 import { createPoll, castVote, closePoll, PollError } from '../polls.js'
@@ -46,7 +48,7 @@ import {
   PAIRABLE_ENGINES, type EngineId,
 } from '../agents/computer/registry.js'
 import { attachComputerControlStream, deliverEngineDetect } from '../agents/computer/control-bus.js'
-import { companyTier } from '../tier.js'
+import { companyTier, TIER_LIMITS } from '../tier.js'
 import { createShippingRouter } from './shipping-router.js'
 import {
   findIdempotentCreate, IdempotencyConflictError,
@@ -203,12 +205,6 @@ async function requireDevice(req: Request & AuthedRequest): Promise<{ computerId
   if (!dev) throw new HttpError(401, 'invalid or revoked device token')
   return dev
 }
-
-const TIER_LIMITS = {
-  free: { companiesPerUser: 3,  agentsPerCompany: 10, humansPerCompany: 5  },
-  pro:  { companiesPerUser: 10, agentsPerCompany: 20, humansPerCompany: 10 },
-  max:  { companiesPerUser: 25, agentsPerCompany: 50, humansPerCompany: 25 },
-} as const
 
 type Tier = keyof typeof TIER_LIMITS
 
@@ -1811,6 +1807,7 @@ api.delete('/companies/:id', safe(async (req, res) => {
     )
     nextCompanyId = alternatives[0]?.company_id ?? null
     if (!nextCompanyId) throw new HttpError(409, 'you cannot delete your only workspace')
+    await client.query(`SELECT set_config('cumora.external_artifact_cleanup_company', $1, true)`, [companyId])
 
     const { rows: members } = await client.query<{ user_id: string }>(
       `SELECT user_id FROM company_members WHERE company_id = $1`, [companyId],
@@ -2456,6 +2453,7 @@ api.get('/participants', async (req, res) => {
     departedAt: string | null
     computerId: string | null; engine: string | null; fastModel: string | null; providerProfile: string | null
     engineInherit: boolean | null
+    executionKind: 'native' | 'external-service'; executionEnabled: boolean
   }>(
     `SELECT p.id, p.kind, p.name, p.role, p.initial,
             p.avatar_bg AS "avatarBg", p.avatar_url AS "avatarUrl",
@@ -2463,6 +2461,7 @@ api.get('/participants', async (req, res) => {
             p.bio, p.tools, p.system_prompt AS "systemPrompt", p.model,
             p.computer_id AS "computerId", p.engine, p.fast_model AS "fastModel", p.provider_profile AS "providerProfile",
             p.engine_inherit AS "engineInherit",
+            p.execution_kind AS "executionKind", p.execution_enabled AS "executionEnabled",
             -- Email resolution differs by kind:
             --  - agents carry their own minted address on participants.email
             --  - humans don't have one there; surface their real auth email
@@ -5547,7 +5546,7 @@ api.get('/devtools/agent-workspace', safe(async (req, res) => {
         (LENGTH(body) - LENGTH(REPLACE(body, E'\n', '')) + 1)::int AS "lineCount",
         updated_at AS "updatedAt"
        FROM agent_workspace
-      WHERE agent_id = $1 AND company_id = $2
+      WHERE agent_id = $1 AND company_id = $2 AND path NOT LIKE 'external-artifacts/%'
       ORDER BY path ASC`,
     [agentId, tenant],
   )
@@ -5559,6 +5558,7 @@ api.get('/devtools/agent-workspace/file', safe(async (req, res) => {
   const agentId = String(req.query.agentId ?? '').trim()
   const path = String(req.query.path ?? '').trim()
   if (!agentId || !path) throw new HttpError(400, 'agentId and path required')
+  if (path.startsWith('external-artifacts/')) throw new HttpError(404, 'not found')
   const { rows } = await pool.query(
     `SELECT
         path,
@@ -7240,6 +7240,8 @@ api.post('/push/unregister', async (req, res) => {
 // tenant/role gates as the rest of this file; it never trusts company ids from
 // request bodies or URLs.
 api.use('/shipping', createShippingRouter({ pool, requireCompany, requireCompanyRole }))
+api.use('/external-artifacts', createExternalArtifactRouter({ pool, requireCompany }))
+api.use('/integrations', createIntegrationRouter({ requireCompany: requireCompanyRole }))
 
 // Global error handler — must come after all routes. HttpError → status code.
 api.use(errorHandler)

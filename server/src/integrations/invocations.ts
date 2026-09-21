@@ -49,7 +49,7 @@ function checkActor(actor: BindingActor): void {
 function safeSnapshot(value: InvocationSnapshot): InvocationSnapshot {
   const { bindingId, bindingVersion, connectionId, connectionVersion, authorizationVersion, remoteAgentId, tenantId, knowledgeBaseIds, effectiveConfigDigest } = value
   if (![bindingId, bindingVersion, connectionId, connectionVersion, authorizationVersion, remoteAgentId, tenantId, effectiveConfigDigest].every(v => typeof v === 'string' && v.trim() && v.length <= 256)
-    || !Array.isArray(knowledgeBaseIds) || !knowledgeBaseIds.length || !knowledgeBaseIds.every(v => typeof v === 'string' && v.trim())) throw new Error('invalid_snapshot')
+    || !Array.isArray(knowledgeBaseIds) || !knowledgeBaseIds.every(v => typeof v === 'string' && v.trim())) throw new Error('invalid_snapshot')
   return { bindingId, bindingVersion, connectionId, connectionVersion, authorizationVersion, remoteAgentId, tenantId, knowledgeBaseIds: [...knowledgeBaseIds], effectiveConfigDigest }
 }
 
@@ -145,11 +145,11 @@ export class InvocationStore {
     return (await this.#db.query<{ remote_session_id: string }>('SELECT remote_session_id FROM external_sessions WHERE scope_key=$1 AND company_id=$2 AND subject_id=$3 AND content_expires_at>NOW()', [invocation.session_scope, actor.companyId, actor.subjectId])).rows[0]?.remote_session_id ?? null
   }
 
-  async saveSession(actor: BindingActor, invocation: Invocation, sessionId: string): Promise<void> {
+  async saveSession(actor: BindingActor, invocation: Invocation, sessionId: string, idKey: 'sessionId' | 'contextId' = 'sessionId'): Promise<void> {
     await this.withSubjectTransaction(actor, async tx => {
       const owned = await tx.query(`UPDATE external_invocations SET remote_ids=$5,updated_at=NOW()
         WHERE company_id=$1 AND subject_id=$2 AND id=$3 AND generation=$4 AND status='dispatching' AND lease_expires_at>NOW() RETURNING id`,
-      [actor.companyId, actor.subjectId, invocation.id, invocation.generation, { sessionId }])
+      [actor.companyId, actor.subjectId, invocation.id, invocation.generation, { [idKey]: sessionId }])
       if (owned.rowCount !== 1) throw new Error('owner_lost')
       await tx.query(`INSERT INTO external_sessions(scope_key,company_id,subject_id,scope,remote_session_id)
         VALUES($1,$2,$3,$4,$5) ON CONFLICT(scope_key) DO UPDATE

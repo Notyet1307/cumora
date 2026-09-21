@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { type ApiWorkspaceMember, api, ws } from '@/api/client'
 import { useT } from '@/lib/i18n'
 import { type AuthCompany, useAuth } from '@/stores/auth'
+import { IntegrationSettings } from './IntegrationSettings'
 
 interface Props {
   company: AuthCompany
@@ -22,6 +23,7 @@ export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClos
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const memberLoadGeneration = useRef(0)
+  const [section, setSection] = useState<'members' | 'integrations'>('members')
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -106,7 +108,7 @@ export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClos
         disabled={deleting}
         onClick={onClose}
       />
-      <div className="relative w-full max-w-[620px] max-h-[86vh] overflow-y-auto rounded-[16px] bg-paper shadow-2xl border border-ink-100">
+      <div className={`relative w-full ${section === 'integrations' ? 'max-w-[900px]' : 'max-w-[620px]'} max-h-[86vh] overflow-y-auto scroll-pt-24 rounded-[16px] bg-paper shadow-2xl border border-ink-100`}>
         <div className="sticky top-0 z-10 flex items-start justify-between gap-4 px-5 py-4 bg-paper border-b border-ink-100">
           <div className="min-w-0">
             <h2 className="text-[17px] font-semibold text-ink-900">{t('workspace.settingsTitle')}</h2>
@@ -115,11 +117,26 @@ export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClos
           <button
             type="button"
             disabled={deleting}
+            aria-label={t('common.close')}
             onClick={onClose}
             className="w-8 h-8 rounded-full hover:bg-cloud text-ink-400 text-[20px] leading-none disabled:opacity-40"
           >×</button>
         </div>
 
+        {(company.role === 'owner' || company.role === 'admin') && (
+          <nav className="flex flex-wrap gap-2 border-b border-ink-100 px-5 py-3" aria-label={t('workspace.settingsTitle')}>
+            {(['members', 'integrations'] as const).map((item) => (
+              <button key={item} type="button" aria-pressed={section === item} onClick={() => setSection(item)}
+                className={`rounded-[8px] px-3 py-2 text-[12px] font-semibold ${section === item ? 'bg-skype text-white' : 'text-ink-500 hover:bg-cloud'}`}>
+                {item === 'members' ? t('workspace.membersTitle') : t('integrations.title')}
+              </button>
+            ))}
+          </nav>
+        )}
+        {section === 'integrations' && (company.role === 'owner' || company.role === 'admin') ? (
+          <IntegrationSettings key={company.id} companyId={company.id} />
+        ) : (
+        <>
         <section className="px-5 py-4">
           <div className="flex items-center justify-between gap-3 mb-3">
             <div>
@@ -210,6 +227,8 @@ export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClos
             </div>
             {deleteError && <div className="mt-2 text-[11.5px] text-coral-deep">{deleteError}</div>}
           </section>
+        )}
+        </>
         )}
       </div>
     </div>

@@ -49,6 +49,8 @@ import {
 import { EXTERNAL_INVOCATIONS_SQL, externalInvocationsChecksum } from './migrations/0010-external-invocations.js'
 import { AGENT_EXECUTION_SQL, agentExecutionChecksum } from './migrations/0011-agent-execution.js'
 import { EXTERNAL_MESSAGE_DELIVERIES_SQL, externalMessageDeliveriesChecksum } from './migrations/0012-external-message-deliveries.js'
+import { EXTERNAL_ARTIFACTS_SQL, externalArtifactsChecksum } from './migrations/0013-external-artifacts.js'
+import { INTEGRATION_MANAGEMENT_SQL, integrationManagementChecksum } from './migrations/0014-integration-management.js'
 
 /** Frozen data backfill embedded in migration 0001. Exported so its behavior
  * can be exercised against PostgreSQL without replaying the whole migration. */
@@ -2636,6 +2638,18 @@ const VERSIONED_MIGRATIONS: readonly VersionedMigration[] = [
     sourceChecksum: externalMessageDeliveriesChecksum(),
     transactional: true,
     up: async (client) => { await client.query(EXTERNAL_MESSAGE_DELIVERIES_SQL) },
+  },
+  {
+    ...SCHEMA_MIGRATIONS[12],
+    sourceChecksum: externalArtifactsChecksum(),
+    transactional: true,
+    up: async (client) => { await client.query(EXTERNAL_ARTIFACTS_SQL) },
+  },
+  {
+    ...SCHEMA_MIGRATIONS[13],
+    sourceChecksum: integrationManagementChecksum(),
+    transactional: true,
+    up: async (client) => { await client.query(INTEGRATION_MANAGEMENT_SQL) },
   },
 ]
 

@@ -30,7 +30,7 @@ function AgentCard({ p, onEdit, onDelete }: {
   const conversations = useConversations((s) => s.list)
   const host = useComputers((s) => (p.computerId ? s.byId[p.computerId] : undefined))
   const hostIcon = !host || host.kind === 'cloud' ? '☁' : host.kind === 'vps' ? '🖥' : '💻'
-  const hostLabel = host ? host.name : t('agents.hostCloud')
+  const hostLabel = p.executionKind === 'external-service' ? t('integrations.externalMember') : host ? host.name : t('agents.hostCloud')
   const hostOffline = !!host && host.kind !== 'cloud' && host.status !== 'online'
   const displayStatus = hostOffline ? 'resting' : p.status
   const displayStatusLabel = hostOffline
@@ -115,7 +115,7 @@ function AgentCard({ p, onEdit, onDelete }: {
             <div className="inline-flex items-center gap-1 min-w-0 overflow-hidden text-[11px] py-0.5 px-2 rounded-full text-ink-500"
               style={{ background: 'var(--ink-100)' }}
               title={hostOffline ? t('agents.hostOfflineTip', { host: hostLabel }) : t('agents.hostRunsOn', { host: hostLabel })}>
-              <span className="shrink-0">{hostIcon}</span>
+              {p.executionKind !== 'external-service' && <span className="shrink-0">{hostIcon}</span>}
               <span className="min-w-0 truncate">{hostLabel}</span>
               {hostOffline && <span className="italic text-ink-400 shrink-0">{t('agents.hostOfflineSuffix')}</span>}
             </div>

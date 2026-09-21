@@ -1,10 +1,12 @@
 import { getActiveCompanyId, getAuthToken, useAuth } from '@/stores/auth'
+import type { BindingConfig, IntegrationManagementView, IntegrationProbeResult } from '@/integration-types'
 import type {
   BoardCardComment, BoardCardLookup, BoardSnapshot, BoardSummary,
   CalendarDispatch, CalendarEvent, CalendarEventKind, CalendarEventStatus,
   CalendarReminderChannel, ComputerKind, ComputerStatus, DetectedEngine,
   EngineDefaultsMap, EngineId, Message, RecurrenceRule, Status,
 } from '@/types'
+import type { ArtifactContent, ArtifactHandoff, ArtifactSummary, ArtifactView, CaptureArtifactInput, CreateArtifactHandoffInput } from '../../shared/external-artifacts'
 
 const DEVTOOLS_KEY = 'cumora.devtools.enabled'
 const SERVER_URL_KEY = 'cumora.serverUrl'
@@ -222,6 +224,8 @@ export interface ApiParticipant {
   model?: string | null
   email?: string | null
   departedAt?: string | null
+  executionKind?: 'native' | 'external-service'
+  executionEnabled?: boolean
   computerId?: string | null
   engine?: string | null
   engineInherit?: boolean | null
@@ -858,6 +862,28 @@ export const api = {
     http<ApiQuotaResponse>('/me/quota'),
   listCompanies: () =>
     http<Array<{ id: string; name: string; slug: string; createdAt: string; role: string }>>('/companies'),
+  getIntegrations: () => http<IntegrationManagementView>('/integrations'),
+  saveIntegrations: (expectedRevision: number, config: BindingConfig) =>
+    http<IntegrationManagementView>('/integrations', {
+      method: 'PUT', body: JSON.stringify({ expectedRevision, config }),
+    }),
+  importIntegrations: (expectedRevision: number, config: BindingConfig) =>
+    http<IntegrationManagementView>('/integrations/import', {
+      method: 'POST', body: JSON.stringify({ expectedRevision, config }),
+    }),
+  rollbackIntegrations: (expectedRevision: number, revision: number) =>
+    http<IntegrationManagementView>('/integrations/rollback', {
+      method: 'POST', body: JSON.stringify({ expectedRevision, revision }),
+    }),
+  createIntegrationMember: (name: string, requestId: string) =>
+    http<{ id: string }>('/integrations/members', {
+      method: 'POST', body: JSON.stringify({ name, requestId }),
+    }),
+  testIntegration: (revision: number, bindingId: string) =>
+    http<IntegrationProbeResult>('/integrations/test', {
+      method: 'POST', body: JSON.stringify({ revision, bindingId }),
+    }),
+  exportIntegrations: () => http<BindingConfig>('/integrations/export'),
   listProjects: () => http<ApiProject[]>('/projects'),
   getShippingOverview: () => http<ShippingOverview>('/shipping/overview'),
   getShippingFeature: (id: string) => http<ShippingFeatureDetail>(`/shipping/features/${encodeURIComponent(id)}`),
@@ -1109,6 +1135,20 @@ export const api = {
     status: string; reason?: string; expired?: boolean; answer?: string
     presentation?: Omit<NonNullable<Message['externalResult']>, 'deliveryId' | 'invocationId'> & { body: string }
   }>(`/external-deliveries/${encodeURIComponent(id)}`),
+  listExternalArtifacts: () => http<{ artifacts: ArtifactSummary[] }>('/external-artifacts'),
+  captureExternalArtifact: (input: CaptureArtifactInput) =>
+    http<ArtifactView>('/external-artifacts', { method: 'POST', body: JSON.stringify(input) }),
+  getExternalArtifact: (id: string) => http<ArtifactView>(`/external-artifacts/${encodeURIComponent(id)}`),
+  getExternalArtifactVersion: (id: string, version: number) =>
+    http<ArtifactContent>(`/external-artifacts/${encodeURIComponent(id)}/versions/${version}`),
+  reviseExternalArtifact: (id: string, input: { expectedRevision: number; inputText: string }) =>
+    http<ArtifactView>(`/external-artifacts/${encodeURIComponent(id)}/revise`, { method: 'POST', body: JSON.stringify(input) }),
+  handoffExternalArtifact: (id: string, input: CreateArtifactHandoffInput) =>
+    http<ArtifactHandoff>(`/external-artifacts/${encodeURIComponent(id)}/handoffs`, { method: 'POST', body: JSON.stringify(input) }),
+  reviewExternalArtifact: (id: string, handoffId: string, input: { outputVersion: number; decision: 'accepted' | 'rejected'; note: string }) =>
+    http<ArtifactView>(`/external-artifacts/${encodeURIComponent(id)}/handoffs/${encodeURIComponent(handoffId)}/review`, { method: 'POST', body: JSON.stringify(input) }),
+  cancelExternalArtifactHandoff: (id: string, handoffId: string) =>
+    http<ArtifactView>(`/external-artifacts/${encodeURIComponent(id)}/handoffs/${encodeURIComponent(handoffId)}/cancel`, { method: 'POST', body: '{}' }),
   getMessages: (
     conversationId: string,
     opts?: { before?: number; limit?: number },

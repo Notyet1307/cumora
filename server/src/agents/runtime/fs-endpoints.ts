@@ -41,6 +41,10 @@ function ensureSafePath(p: string | undefined, res: Response): string | null {
   }
   // Allow empty string (root). Otherwise enforce shape.
   if (p === '') return ''
+  if (p === 'external-artifacts' || p.startsWith('external-artifacts/')) {
+    res.status(404).json({ error: 'not found' })
+    return null
+  }
   if (!isSafePath(p)) {
     badRequest(res, `unsafe path: ${p}`)
     return null
@@ -86,7 +90,7 @@ export function attachFsEndpoints(
     // `agent_id = $1` clause is JWT-pinned), but the API contract is
     // "list children of EXACTLY this prefix."
     const { rows } = await pool.query<{ path: string }>(
-      `SELECT path FROM agent_workspace WHERE agent_id = $1 AND path LIKE $2 || '%' ESCAPE '\\'`,
+      `SELECT path FROM agent_workspace WHERE agent_id = $1 AND path NOT LIKE 'external-artifacts/%' AND path LIKE $2 || '%' ESCAPE '\\'`,
       [c.sub, likeEscape(prefix)],
     )
     const seen = new Map<string, boolean>()    // name → isDir
@@ -195,7 +199,7 @@ export function attachFsEndpoints(
     // Same ESCAPE rationale as in /fs/list above.
     const dirRow = await pool.query<{ n: number }>(
       `SELECT 1 AS n FROM agent_workspace
-        WHERE agent_id = $1 AND path LIKE $2 || '%' ESCAPE '\\' LIMIT 1`,
+        WHERE agent_id = $1 AND path NOT LIKE 'external-artifacts/%' AND path LIKE $2 || '%' ESCAPE '\\' LIMIT 1`,
       [c.sub, likeEscape(p + '/')],
     )
     if (dirRow.rows.length > 0) {

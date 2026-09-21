@@ -7,10 +7,10 @@ import { mentionedAgentIds } from '../agents/scheduler.js'
 import { persistReply } from '../message-persistence.js'
 import { CH_STATUS } from '../redis.js'
 import { enqueueBroadcast, nudgeRealtimeOutbox } from '../realtime-outbox.js'
-import type { BindingResolver, ResolvedAgentBinding } from './bindings.js'
+import type { BindingProvider, BindingResolver, ResolvedExternalAgentBinding } from './bindings.js'
 import { bindingSnapshot, executeClaim } from './agent-execution.js'
 import { InvocationStore, invocationDigest, type Invocation, type InvocationSnapshot } from './invocations.js'
-import { presentAnswer, requireAnswer, sourceEvidence } from './agent-evidence.js'
+import { presentAnswer } from './agent-evidence.js'
 
 export interface DeliveryStatusView {
   id: string
@@ -47,13 +47,17 @@ export async function lockMessageParticipants(tx: PoolClient, companyId: string,
 /** Transactional admission, bounded draining, trusted publication and current-ACL reads. */
 export class MemberAgent {
   readonly #db: Pool
-  readonly #bindings?: BindingResolver
+  readonly #bindings?: BindingProvider
   readonly #store: InvocationStore
   // ponytail: one in-flight drain per process; use a bounded member pool if throughput requires it.
   #timer?: NodeJS.Timeout
   #draining?: Promise<number>
   #stopping = false
-  constructor(db: Pool, bindings?: BindingResolver) { this.#db = db; this.#bindings = bindings; this.#store = new InvocationStore(db) }
+  constructor(db: Pool, bindings?: BindingResolver | BindingProvider) {
+    this.#db = db
+    this.#bindings = typeof bindings === 'function' ? bindings : bindings ? async () => bindings : undefined
+    this.#store = new InvocationStore(db)
+  }
 
   async acceptMessage(tx: PoolClient, messageId: string, lockedParticipantIds: readonly string[]): Promise<DeliveryStatusView[]> {
     const source = (await tx.query<{ id: string; company_id: string; conversation_id: string; author_id: string; sequence: number;
@@ -74,8 +78,9 @@ export class MemberAgent {
     for (const member of members.filter(m => selected.includes(m.id))) {
       if (!lockedParticipantIds.includes(member.id)) throw new Error('conversation_members_changed_retry')
       const actor = { companyId: source.company_id, subjectId: member.id }
-      const execution = await resolveExecution(actor, this.#bindings, tx)
-      const binding = this.#bindings?.resolve(actor, 'weknora.agent', 'agent-service')
+      const bindings = await this.#bindings?.(actor, tx)
+      const execution = await resolveExecution(actor, bindings, tx)
+      const binding = bindings?.resolveAgent(actor)
       const reason = !source.body.trim() ? 'text_required' : source.body.length > 8000 ? 'input_too_long'
         : execution.kind !== 'external-service' || !binding?.ok ? 'external_unavailable' : null
       const { rows } = await tx.query<Delivery>(`INSERT INTO external_message_deliveries
@@ -98,7 +103,7 @@ export class MemberAgent {
     return (await tx.query<Delivery>('SELECT * FROM external_message_deliveries WHERE id=$1 FOR UPDATE', [candidate.id])).rows[0] ?? null
   }
 
-  async #authorization(tx: PoolClient, d: Delivery): Promise<ResolvedAgentBinding | null> {
+  async #authorization(tx: PoolClient, d: Delivery): Promise<ResolvedExternalAgentBinding | null> {
     if (new Date(d.content_expires_at).getTime() <= Date.now()) return null
     const source = (await tx.query<{ body: string }>(`SELECT m.body FROM messages m
       JOIN conversations c ON c.id=m.conversation_id AND c.company_id=m.company_id
@@ -114,8 +119,9 @@ export class MemberAgent {
     [d.source_message_id, d.company_id, d.conversation_id, d.member_id, d.source_author_id, d.source_sequence, d.context_id, d.assignment_id])).rows[0]
     if (!source || invocationDigest(source.body) !== d.input_digest) return null
     const actor = { companyId: d.company_id, subjectId: d.member_id }
-    const execution = await resolveExecution(actor, this.#bindings, tx)
-    const selected = this.#bindings?.resolve(actor, 'weknora.agent', 'agent-service')
+    const bindings = await this.#bindings?.(actor, tx)
+    const execution = await resolveExecution(actor, bindings, tx)
+    const selected = bindings?.resolveAgent(actor)
     if (execution.kind !== 'external-service' || execution.assignmentId !== d.assignment_id || !selected?.ok
       || !isDeepStrictEqual(bindingSnapshot(selected.binding), d.snapshot)) return null
     return selected.binding
@@ -198,17 +204,7 @@ export class MemberAgent {
               AND status IN ('dispatching','running') AND lease_expires_at>NOW() FOR SHARE`, [owned.id, owned.generation])
             if (!owner.rowCount) throw new Error('owner_lost')
           })
-        }, async (result, client, signal) => {
-          if (result.status !== 'completed') return result
-          try {
-            requireAnswer({ status: result.status, result })
-            if (!result.evidence.complete || !result.ids) throw new Error('complete_ids_required')
-            const evidence = sourceEvidence(await client.history(result.ids, signal), { id: owned.id, remote_ids: result.ids, result }, {
-              remoteAgentId: binding.remoteAgentId, knowledgeBaseIds: binding.knowledgeBaseIds, allowedTools: binding.approval.allowedTools,
-            })
-            return { ...result, validation: { ok: true, evidence } }
-          } catch { return { ...result, validation: { ok: false, reason: 'answer_validation_failed' } } }
-        })
+        }, true)
       }
       await this.publishExternalResult(claimed.d.id)
       processed++

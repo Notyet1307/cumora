@@ -49,8 +49,10 @@ import { pool } from './db/pool.js'
 import { env } from './env.js'
 import { inc } from './metrics.js'
 import { InvocationStore } from './integrations/invocations.js'
+import { ArtifactService } from './integrations/artifacts.js'
 
 const externalInvocations = new InvocationStore(pool)
+const externalArtifacts = new ArtifactService(pool)
 
 export interface SweepTarget {
   table: string
@@ -129,6 +131,12 @@ export async function runDbGcTick(opts?: { batchSize?: number; maxBatchesPerTabl
   } catch {
     console.error('[db-gc] external invocation content expiry failed')
     inc('db.gc.failed', { table: 'external_invocations' })
+  }
+  try {
+    await externalArtifacts.purgeExpired()
+  } catch {
+    console.error('[db-gc] external artifact content expiry failed')
+    inc('db.gc.failed', { table: 'external_artifacts' })
   }
   for (const t of targets()) {
     if (t.days <= 0) continue

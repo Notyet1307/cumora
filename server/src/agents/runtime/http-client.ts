@@ -28,6 +28,7 @@ import type {
   WorkTaskType,
 } from './client.js'
 import { notifyAlert } from '../../alerting.js'
+import type { LlmCallRecord } from '../llm-ledger.js'
 
 /** Per-process failure counter for the busy heartbeat. The heartbeat
  *  must not crash a turn on a transient Redis hiccup, but a SUSTAINED
@@ -241,6 +242,16 @@ export class HttpRuntimeClient implements AgentRuntimeClient {
       fingerprint: args.fingerprint,
     })
     return out.runId
+  }
+
+  async recordLlmCall(record: LlmCallRecord): Promise<void> {
+    // The public recorder handles best-effort errors. No retry: a lost
+    // response must not duplicate a non-idempotent ledger insertion.
+    await this.call('POST', '/llm-calls', {
+      source: record.source ?? 'cloud',
+      daemonVersion: record.daemonVersion ?? undefined,
+      hops: [record],
+    })
   }
 
   async recordEvent(event: {

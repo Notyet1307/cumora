@@ -149,11 +149,16 @@ async function insertLlmCall(rec: LlmCallRecord): Promise<void> {
   )
 }
 
-/** Single INSERT into `llm_calls`. Never throws — the ledger is observability,
- *  not a hard dependency of the call path. */
+/** Record through the runtime transport in a pod, or directly in the server.
+ *  Never throws — observability is not a hard dependency of the call path. */
 export async function recordLlmCall(rec: LlmCallRecord): Promise<void> {
   try {
-    await insertLlmCall(rec)
+    if (process.env.CUMORA_RUNTIME_CLIENT === 'http') {
+      const { runtime } = await import('./runtime/select.js')
+      await runtime.recordLlmCall(rec)
+    } else {
+      await insertLlmCall(rec)
+    }
   } catch (err) {
     console.warn('[llm-ledger] insert failed — dropping', err instanceof Error ? err.message : err)
   }

@@ -21,6 +21,7 @@ import { CH_MESSAGE_NEW, CH_TYPING, publish, redis } from '../../redis.js'
 import { enqueueBroadcast, nudgeRealtimeOutbox } from '../../realtime-outbox.js'
 import { notifyAlert } from '../../alerting.js'
 import { freshenAttachmentUrl, type StoredAttachment } from '../../storage.js'
+import { recordLlmCall, type LlmCallRecord } from '../llm-ledger.js'
 
 /** Re-sign attachment download URLs just-in-time when loading messages for an
  *  agent turn. The url stored in `messages.attachment` is signed with a TTL
@@ -577,6 +578,10 @@ export class InProcRuntimeClient implements AgentRuntimeClient {
   }
 
   // ─── observability ────────────────────────────────────────────────
+
+  async recordLlmCall(record: LlmCallRecord): Promise<void> {
+    await recordLlmCall(record)
+  }
 
   async createRun(args: {
     agentId: string

@@ -73,6 +73,35 @@ Database migrations are applied via `npm run migrate` (run automatically by `npm
 
 Optional feature groups (OAuth login, email via Resend + Cloudflare Email Routing, R2 storage/CDN, APNs/FCM push, the sub2api per-user LLM gateway, invites, metrics) are declared in `server/src/env.ts`, which is the authoritative list. [`.env.example`](.env.example) annotates a commonly-edited subset of them.
 
+### External connections (schema 14)
+
+Workspace owners/admins manage approved WeKnora Agents, A2A Agents and MCP tools in **Workspace settings → Integrations**. Connections and member authorizations live only in PostgreSQL. Saving, importing or rolling back publishes a new revision; it does not execute a remote task. Metadata tests do not prove authentication enforcement or business execution.
+
+The server operator sets `CUMORA_INTEGRATION_TRUST_FILE` to an absolute, non-symlink JSON file owned by the API process user with mode `0600`. It contains only credentials and outbound ceilings, not runtime bindings:
+
+```json
+{
+  "schemaVersion": 1,
+  "grants": [{
+    "secretRef": "report-key",
+    "credentialRevision": "1",
+    "value": "REPLACE_WITH_SERVER_SECRET",
+    "companyIds": ["your-workspace-id"],
+    "backend": "a2a",
+    "baseUrls": ["http://127.0.0.1:8080/a2a"],
+    "knowledgeBaseIds": [],
+    "remoteAgentIds": ["report"],
+    "toolNames": []
+  }]
+}
+```
+
+Each grant pairs its credential with an exact approved URL and workspace/resource scope. Only literal loopback addresses are supported; no arbitrary URLs or DNS hosts. Restart every API instance after changing this server-only file. An absent file grants nothing; an unsafe file disables the integration service rather than falling back. Credential rotation requires a new approved `credentialRevision`, followed by selecting it and saving in the Web UI.
+
+**Upgrade cutover:** `CUMORA_EXTERNAL_AGENT_CONFIG` is no longer loaded. Back up the old file privately, move its secrets into explicit trust grants, then import **only its `bindingConfig` object** through the management page. Never upload the old secret-containing envelope. Imports revalidate current membership, execution kind, approved resources and in-flight work; versions and assignments are regenerated. Existing R1 search environment configuration remains independent.
+
+Agent-service authorizations require dedicated external members, created disabled. MCP authorizations attach to native members without changing their engine or Computer. Publication conservatively rotates all configured members' assignments; connected native runtimes must obtain current credentials. Disabling fences future steps/publication, not remote execution already accepted. Active/unknown work blocks re-enabling and rollback to an enabled configuration; do not retry ambiguous remote work. Rollback never rewrites historical Invocation identities. Free external-only workspaces do not need a paired native Computer.
+
 ### Tests
 
 ```bash

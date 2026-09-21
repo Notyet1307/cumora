@@ -31,6 +31,8 @@
  *     Promise<void>). HTTP retries / queueing handled inside the impl,
  *     not the caller.
  */
+import type { LlmCallRecord } from '../llm-ledger.js'
+
 
 export interface InboxAttachment {
   url: string
@@ -306,6 +308,8 @@ export interface AgentRuntimeClient {
   humanRecentlyActive(companyId: string, windowMinutes?: number): Promise<boolean>
 
   // === Observability ===
+  /** Record one model call; HTTP runtime pins identity to its token. */
+  recordLlmCall(record: LlmCallRecord): Promise<void>
   /** Open a new agent_runs row; returns the runId for subsequent calls. */
   createRun(args: {
     agentId: string

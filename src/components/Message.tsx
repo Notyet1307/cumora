@@ -18,6 +18,7 @@ import { useApp } from '@/stores/app'
 import { useMe } from '@/stores/auth'
 import { toggleReaction, retryFailedMessage, discardFailedMessage, useMessages } from '@/stores/messages'
 import { api } from '@/api/client'
+import { ExternalArtifactPanel } from './ExternalArtifactPanel'
 import { DocumentLink } from './DocumentLink'
 import { BoardLink } from './BoardLink'
 import { CardLink } from './CardLink'
@@ -565,6 +566,7 @@ function ExternalMessageEvidence({ msg }: { msg: Message }) {
           {citation.chunkIndex !== undefined ? ` · 条块 ${citation.chunkIndex}` : ''} · same-turn-search</div>
       </details>)}
       <ExternalDetails id={msg.externalResult.deliveryId} />
+      <ExternalArtifactPanel deliveryId={msg.externalResult.deliveryId} conversationId={msg.conversationId} />
     </div>}
   </>
 }
@@ -1809,7 +1811,12 @@ function MessageRowImpl({ msg, author, delay = 0, animate = true }: MessageRowPr
             color: '#5A2B22',
           } : undefined}
         >
-          <RichBody body={msg.body} conversationId={msg.conversationId} external={Boolean(msg.externalResult)} />
+          {msg.externalResult ? <details>
+            <summary className="cursor-pointer font-semibold">外部回答 · {msg.body.length} 字符 · 展开全文
+              <span className="mt-1 block line-clamp-2 font-normal">{msg.body}</span>
+            </summary>
+            <RichBody body={msg.body} conversationId={msg.conversationId} external />
+          </details> : <RichBody body={msg.body} conversationId={msg.conversationId} />}
         </div>
       )}
       <ExternalMessageEvidence msg={msg} />

@@ -84,6 +84,8 @@ export interface Computer {
 export interface Participant {
   id: string
   kind: ParticipantKind
+  executionKind?: 'native' | 'external-service'
+  executionEnabled?: boolean
   name: string
   role?: string
   initial: string

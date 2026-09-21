@@ -101,6 +101,7 @@ test('invalid, disabled, missing and out-of-scope bindings never yield a connect
 test('a full Agent declaration is unavailable and cannot fall back to retrieval', () => {
   const candidate = config()
   candidate.connections.push({ ...candidate.connections[0], id: 'agent', kind: 'agent-service', secretRef: 'agent-key' })
+  assert.ok(candidate.bindings[0].capabilityId === 'weknora.search')
   candidate.bindings.push({ ...candidate.bindings[0], id: 'external', kind: 'agent-service', capabilityId: 'weknora.agent', remoteAgentId: 'remote-agent', connectionId: 'agent' })
   const resolver = new BindingResolver(candidate, { key: 'retrieve-key', 'agent-key': 'chat-key' })
   assert.deepEqual(resolver.resolve(actor, 'weknora.agent', 'agent-service'), { ok: false, code: 'unavailable' })
@@ -189,7 +190,7 @@ test('all MCP selection requires immutable evidence that no services are enabled
     }
   }
   const missing = structuredClone(candidate)
-  if (missing.bindings[0].kind === 'agent-service') delete missing.bindings[0].approval!.mcpEnabledServiceIds
+  if (missing.bindings[0].capabilityId === 'weknora.agent') delete missing.bindings[0].approval!.mcpEnabledServiceIds
   assert.throws(() => new BindingResolver(missing, { key: 'chat-secret' }), e => e instanceof BindingConfigError && e.code === 'invalid_config')
   enabledServices.push('service-added-after-approval')
   const result = first.resolve(actor, 'weknora.agent', 'agent-service')
@@ -211,7 +212,7 @@ test('equivalent approval property and tool-set order preserve version identity,
     const equivalent = structuredClone(candidate)
     const grant = equivalent.bindings[0]
     assert.equal(grant.kind, 'agent-service')
-    if (grant.kind !== 'agent-service' || !grant.approval) throw new Error('invalid test grant')
+    if (grant.capabilityId !== 'weknora.agent' || !grant.approval) throw new Error('invalid test grant')
     if (variant === 'properties') grant.approval = Object.fromEntries(Object.entries(grant.approval).reverse()) as typeof approval
     else if (variant === 'tools') grant.approval.allowedTools.reverse()
     else grant.approval.allowedTools.push('knowledge_search')
@@ -229,4 +230,17 @@ test('equivalent approval property and tool-set order preserve version identity,
     assert.throws(() => new BindingResolver(different, { key: 'chat-secret' }, first), e => e instanceof BindingConfigError && e.code === 'version_conflict')
     assert.ok(first.resolve(actor, 'weknora.agent', 'agent-service').ok)
   }
+})
+
+test('a primary external member cannot choose between protocols or fall back to a disabled peer', () => {
+  const candidate = config()
+  candidate.connections[0] = { ...candidate.connections[0], kind: 'agent-service', backend: 'a2a', baseUrl: 'http://127.0.0.1:5818/a2a', knowledgeBaseIds: [] }
+  candidate.bindings[0] = { ...candidate.bindings[0], kind: 'agent-service', capabilityId: 'a2a.agent', remoteAgentId: 'report',
+    approval: { authorizationVersion: '1', tenantId: 'reference', effectiveConfigDigest: 'a'.repeat(64), cardSha256: 'a'.repeat(64), protocolVersion: '0.3.0' } }
+  const selected = new BindingResolver(candidate, { key: 'fixture-only' }).resolveAgent(actor)
+  assert.ok(selected.ok && selected.binding.backend === 'a2a')
+  candidate.connections.push({ ...candidate.connections[0], id: 'legacy', backend: 'weknora', baseUrl: 'http://127.0.0.1:8180/api/v1', knowledgeBaseIds: ['kb-a'] })
+  candidate.bindings.push({ id: 'legacy', version: '1', connectionId: 'legacy', connectionVersion: '1', companyIds: ['co-a'], subjectIds: ['compliance'],
+    enabled: false, kind: 'agent-service', capabilityId: 'weknora.agent', remoteAgentId: 'unapproved' })
+  assert.deepEqual(new BindingResolver(candidate, { key: 'fixture-only' }).resolveAgent(actor), { ok: false, code: 'ambiguous_binding' })
 })

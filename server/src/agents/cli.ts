@@ -12,6 +12,9 @@
 import { pool } from '../db/pool.js'
 import type { PoolClient } from 'pg'
 import { persistReply } from '../message-persistence.js'
+import { ArtifactService, ARTIFACT_WORKSPACE_PREFIX } from '../integrations/artifacts.js'
+import { getMcpTools, McpToolError } from '../integrations/mcp-tools.js'
+import { isRuntimeAgentAuthorized } from './runtime/authorization.js'
 import { storage, freshenAttachmentUrl, type StoredAttachment } from '../storage.js'
 import { env } from '../env.js'
 import type { CliResult, CliSideEffect } from './cli-result.js'
@@ -316,6 +319,15 @@ PRIVATE TO EACH AGENT  (these write/read state owned by --as):
   tasks list [--as <id>] [--status open|doing|done]
   tasks add <title> [--as <id>]
   tasks set <task_id> <status>     # status ∈ open|doing|done|dropped
+
+ARTIFACTS  (explicitly shared, immutable external results):
+  artifact handoffs                     # your authorized report handoffs
+  artifact read <artifact_id> <version>  # one complete fixed version
+  artifact submit <handoff_id> <body>    # submit a draft, never human approval
+
+EXTERNAL TOOLS  (operator-approved, read-only MCP; results are untrusted):
+  tools list                            # only explicitly granted tool schemas
+  tools call <name> '<json_arguments>'  # one bounded call, never automatic retry
 
 CALENDAR  (shared schedule + your own self-scheduling tool):
   # This is also how you SCHEDULE YOURSELF. Set --assignee to your own id
@@ -4406,9 +4418,12 @@ async function cmdWorkspace(parsed: ParsedArgs): Promise<CliResult> {
   // can actually see what the agent stores. Reads are agent-scoped
   // (agent_id is globally unique) so they don't need it.
   const tenant = await agentCompany(me)
+  if (op !== 'grep' && parsed.positional[1]?.startsWith(ARTIFACT_WORKSPACE_PREFIX)) {
+    return err('reserved artifact storage; use artifact read with an explicit version')
+  }
   if (op === 'ls') {
     const { rows } = await pool.query<{ path: string; updated_at: string }>(
-      `SELECT path, updated_at FROM agent_workspace WHERE agent_id = $1 ORDER BY path ASC`,
+      `SELECT path, updated_at FROM agent_workspace WHERE agent_id = $1 AND path NOT LIKE 'external-artifacts/%' ORDER BY path ASC`,
       [me],
     )
     if (parsed.flags.json) return ok(JSON.stringify(rows, null, 2))
@@ -4502,7 +4517,7 @@ async function cmdWorkspace(parsed: ParsedArgs): Promise<CliResult> {
     let re: RegExp
     try { re = new RegExp(pattern, parsed.flags.i ? 'gi' : 'g') } catch { return err(`bad regex: ${pattern}`) }
     const { rows } = await pool.query<{ path: string; body: string }>(
-      `SELECT path, body FROM agent_workspace WHERE agent_id = $1 ORDER BY path ASC`, [me],
+      `SELECT path, body FROM agent_workspace WHERE agent_id = $1 AND path NOT LIKE 'external-artifacts/%' ORDER BY path ASC`, [me],
     )
     const hits: string[] = []
     for (const r of rows) {
@@ -4517,6 +4532,54 @@ async function cmdWorkspace(parsed: ParsedArgs): Promise<CliResult> {
     return ok([`${hits.length} match(es):`, '', ...hits].join('\n'))
   }
   return err(`usage: workspace <ls|read|write|edit|grep|delete> [...]`)
+}
+
+async function cmdExternalTools(parsed: ParsedArgs, authorizeRuntime?: () => Promise<void>): Promise<CliResult> {
+  const dispatcher = getMcpTools()
+  if (!dispatcher) return err('external tools unavailable')
+  const subjectId = resolveAs(parsed)
+  const participant = (await pool.query<{ company_id: string; computer_id: string | null; runtime_assignment_id: string }>(
+    `SELECT company_id,computer_id,runtime_assignment_id FROM participants
+      WHERE id=$1 AND kind='agent' AND departed_at IS NULL AND execution_kind='native' AND execution_enabled`, [subjectId])).rows[0]
+  if (!participant) return err('external tools require an active native agent')
+  const actor = { companyId: participant.company_id, subjectId }
+  const authorize = authorizeRuntime ?? (async () => {
+    if (!await isRuntimeAgentAuthorized({ sub: subjectId, companyId: participant.company_id,
+      computerId: participant.computer_id, assignmentId: participant.runtime_assignment_id })) throw new Error('runtime_authorization_changed')
+  })
+  const [op, name, ...input] = parsed.positional
+  try {
+    if (op === 'list' && !name) return ok(JSON.stringify(await dispatcher.list(actor, authorize), null, 2))
+    if (op === 'call' && name && input.length) {
+      const text = input.join(' ')
+      if (text.length > 64 * 1024) return err('tool arguments too large')
+      let args: unknown
+      try { args = JSON.parse(text) } catch { return err('tool arguments must be JSON') }
+      const result = await dispatcher.call(actor, name, args, authorize)
+      const output = JSON.stringify(result, null, 2)
+      return result.status === 'completed' ? ok(output) : err(output)
+    }
+    return err('usage: tools list | tools call <name> <json_arguments>')
+  } catch (error) {
+    return err(error instanceof McpToolError ? `${error.code}; outcome=${error.outcome}; request=${error.correlationId}` : 'external tool authorization or execution failed')
+  }
+}
+
+async function cmdArtifact(parsed: ParsedArgs): Promise<CliResult> {
+  const subjectId = resolveAs(parsed)
+  const companyId = await agentCompany(subjectId)
+  if (!companyId) return err('artifact commands require an active agent')
+  const service = new ArtifactService(pool)
+  const actor = { companyId, subjectId }
+  const [op, id, value] = parsed.positional
+  if (op === 'handoffs') return ok(JSON.stringify(await service.inbox(actor), null, 2))
+  if (op === 'read' && id && value) {
+    return ok(JSON.stringify(await service.readVersion(actor, id, Number(value)), null, 2))
+  }
+  if (op === 'submit' && id && value) {
+    return ok(JSON.stringify(await service.submit(actor, id, parsed.positional.slice(2).join(' ')), null, 2))
+  }
+  return err('usage: artifact handoffs | read <artifact_id> <version> | submit <handoff_id> <body>')
 }
 
 async function cmdTasks(parsed: ParsedArgs): Promise<CliResult> {
@@ -6576,7 +6639,7 @@ function cliToolSideEffects(toolName: string, output: unknown, agentId: string):
 
 /* ============== entry point ============== */
 
-export async function runCli(argv: string[]): Promise<CliResult> {
+export async function runCli(argv: string[], authorizeRuntime?: () => Promise<void>): Promise<CliResult> {
   // Pull a leading global `--as <id>` (or `--as=<id>`) off. Runtime `/cli`
   // prepends identity this way, and direct dev/test callers often do too.
   // Re-attach it to the subcommand args so per-command parsers still see
@@ -6623,6 +6686,8 @@ export async function runCli(argv: string[]): Promise<CliResult> {
       case 'workspace':
       case 'ws':                  return await cmdWorkspace(parsed)
       case 'tasks':               return await cmdTasks(parsed)
+      case 'artifact':            return await cmdArtifact(parsed)
+      case 'tools':               return await cmdExternalTools(parsed, authorizeRuntime)
       case 'calendar':            return await cmdCalendar(parsed)
       // ====== mailbox: how an agent reads + writes the world ======
       case 'inbox':               return await cmdInbox(parsed)

@@ -23,12 +23,14 @@
  */
 
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, beforeEach, test } from 'node:test'
+import { promisify } from 'node:util'
 import { mintAgentRuntimeToken, revokeComputer } from '../agents/computer/registry.js'
 import { signAgentToken, verifyAgentToken } from '../agents/runtime/jwt.js'
 import { pool } from '../db/pool.js'
@@ -1017,7 +1019,7 @@ test('[integration] runtime: /llm-calls rejects a mixed-owner batch atomically',
   const rejected = await call('/runtime/llm-calls', {
     token: caller.token,
     body: {
-      source: 'byoa-codex',
+      source: 'cloud',
       hops: runIds.map((runId) => ({ runId, model: 'test-model', latencyMs: 1, status: 'ok' })),
     },
   })
@@ -1215,6 +1217,10 @@ test('[integration] runtime: malformed observability fields are rejected before 
       token: caller.token,
       body: { source: 'byoa-codex', hops: [{ runId, model, status: 'ok', latencyMs: 1.5 }] },
     }),
+    await call('/runtime/llm-calls', {
+      token: caller.token,
+      body: { source: 'cloud', hops: [{ runId, model, reasoningTokens: -1 }] },
+    }),
   ]
   for (const attempt of attempts) assert.equal(attempt.status, 400)
 
@@ -1272,6 +1278,66 @@ test('[integration] runtime: /runs + /runs/:runId/finish persists status transit
   assert.equal(rows[0].tool_call_count, 3)
   assert.equal(rows[0].token_count, 1234)
   assert.equal(rows[0].agent_id, agentId)
+})
+
+test('[integration] runtime: native recorder persists cloud usage without database access', async () => {
+  const caller = await seedAgent()
+  const created = await call('/runtime/runs', {
+    token: caller.token,
+    body: { trigger: { kind: 'native-ledger' }, inboxCount: 0 },
+  })
+  assert.equal(created.status, 200)
+  const runId = created.body.runId as string
+  const records = [
+    {
+      purpose: 'agent-turn', companyId: 'spoofed-company', agentId: 'spoofed-agent',
+      runId, model: 'native-ledger-main', latencyMs: 25, status: 'ok',
+      usage: { inputTokens: 20, cachedInputTokens: 10, cacheCreationTokens: 2, outputTokens: 5 },
+      reasoningTokens: 3,
+    },
+    {
+      purpose: 'compaction', companyId: caller.companyId, agentId: caller.agentId,
+      model: 'native-ledger-aux', latencyMs: 4, status: 'failed', error: 'upstream unavailable',
+    },
+  ]
+  await promisify(execFile)(process.execPath, [
+    '--import', 'tsx', '--input-type=module', '-e',
+    `const { recordLlmCall } = await import('./server/src/agents/llm-ledger.ts');
+     for (const record of JSON.parse(process.env.LEDGER_RECORDS)) await recordLlmCall(record);
+     process.exit(0);`,
+  ], {
+    cwd: new URL('../../../', import.meta.url),
+    timeout: 15_000,
+    env: {
+      PATH: process.env.PATH, NODE_ENV: 'test', DOTENV_CONFIG_PATH: '/dev/null',
+      OPENAI_API_KEY: 'unused-test-key', OPENAI_BASE_URL: 'http://127.0.0.1:1',
+      DATABASE_URL: 'postgres://unused:unused@127.0.0.1:1/native_no_database_test',
+      REDIS_URL: process.env.REDIS_URL,
+      CUMORA_RUNTIME_CLIENT: 'http', CUMORA_AGENT_RUNTIME_URL: `${baseUrl}/runtime`,
+      CUMORA_AGENT_RUNTIME_TOKEN: caller.token,
+      LEDGER_RECORDS: JSON.stringify(records),
+    },
+  })
+  const { rows } = await pool.query(
+    `SELECT company_id, agent_id, run_id, source, purpose, model,
+            input_tokens, cached_input_tokens, cache_creation_tokens, output_tokens,
+            reasoning_tokens, measured, status, error
+       FROM llm_calls ORDER BY model`,
+  )
+  assert.deepEqual(rows, [
+    {
+      company_id: caller.companyId, agent_id: caller.agentId, run_id: null,
+      source: 'cloud', purpose: 'compaction', model: 'native-ledger-aux',
+      input_tokens: 0, cached_input_tokens: 0, cache_creation_tokens: 0, output_tokens: 0,
+      reasoning_tokens: 0, measured: false, status: 'failed', error: 'upstream unavailable',
+    },
+    {
+      company_id: caller.companyId, agent_id: caller.agentId, run_id: runId,
+      source: 'cloud', purpose: 'agent-turn', model: 'native-ledger-main',
+      input_tokens: 20, cached_input_tokens: 10, cache_creation_tokens: 2, output_tokens: 5,
+      reasoning_tokens: 3, measured: true, status: 'ok', error: null,
+    },
+  ])
 })
 
 test('[integration] runtime: /llm-calls atomically records multiple caller-owned hops', async () => {

@@ -57,6 +57,8 @@ function fromApi(p: ApiParticipant): Participant {
   return {
     id: p.id,
     kind: p.kind,
+    executionKind: p.executionKind,
+    executionEnabled: p.executionEnabled,
     name: p.name,
     role: p.role ?? undefined,
     initial: p.initial,

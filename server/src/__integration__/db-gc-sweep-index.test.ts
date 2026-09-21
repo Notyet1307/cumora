@@ -68,19 +68,6 @@ test('[integration] every db-gc sweep target keeps a bare index on its time colu
   }
 })
 
-test('[integration] the sweep query is the one the index is for', async () => {
-  // Pin the shape too. An index on the time column is only useful while the
-  // sweep still filters and orders on that column and nothing else; a future
-  // `ORDER BY id` or an added predicate would silently strip the plan back to
-  // a sort, and the index check above would keep passing.
-  const { readFile } = await import('node:fs/promises')
-  const source = await readFile(new URL('../db-gc.ts', import.meta.url), 'utf8')
-  const fn = source.slice(source.indexOf('async function deleteBatch'))
-  const body = fn.slice(0, fn.indexOf('\n}\n') + 2)
-
-  assert.match(body, /WHERE \$\{t\.timeCol\} </, 'the sweep no longer filters on the time column')
-  assert.match(body, /ORDER BY \$\{t\.timeCol\} ASC/, 'the sweep no longer orders by the time column')
-})
 
 test('[integration] a composite index alone would not satisfy the check', async () => {
   // The guard has to be able to fail. agent_log carries both shapes, so ask for

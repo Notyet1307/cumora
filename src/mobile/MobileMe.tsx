@@ -111,7 +111,7 @@ export function MobileMe() {
       </div>
 
       <div className="flex-1 overflow-y-auto pb-20">
-        {companies.length > 1 && (
+        {companies.length > 0 && (
           <Section title={t('mobileMe.workspace')}>
             <div className="bg-cloud rounded-[12px] p-2" style={{ border: '1px solid var(--ink-100)' }}>
               <CompanySwitcher />

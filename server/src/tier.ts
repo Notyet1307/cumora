@@ -9,6 +9,12 @@ import { pool } from './db/pool.js'
 
 export type Tier = 'free' | 'pro' | 'max'
 
+export const TIER_LIMITS = {
+  free: { companiesPerUser: 3,  agentsPerCompany: 10, humansPerCompany: 5  },
+  pro:  { companiesPerUser: 10, agentsPerCompany: 20, humansPerCompany: 10 },
+  max:  { companiesPerUser: 25, agentsPerCompany: 50, humansPerCompany: 25 },
+} as const
+
 export function normalizeTier(tier: string | null | undefined): Tier {
   return tier === 'pro' || tier === 'max' ? tier : 'free'
 }

@@ -175,7 +175,9 @@ runtimeRouter.post('/cli', withAgent(async (c, req, res) => {
   // identity, and we prepend `--as <jwt.sub>` so runCli resolves to the
   // pinned agent. Implementation lives in cli-argv.ts so the strip
   // rules can be unit-tested in isolation.
-  const result = await runCli(buildRuntimeArgv(c.sub, argv))
+  const result = await runCli(buildRuntimeArgv(c.sub, argv), async () => {
+    if (c.exp * 1000 <= Date.now() || !await isRuntimeAgentAuthorized(c)) throw new Error('runtime_authorization_changed')
+  })
   res.json({
     text: result.text,
     exitCode: result.exitCode,
@@ -550,12 +552,8 @@ runtimeRouter.post('/triage', withAgent(async (c, req, res) => {
   res.json({ ok: true })
 }))
 
-// Per-HOP trajectory for BYOA agents. The daemon's ClaudeSession /
-// CodexSession emits one EngineHopReport per assistant message (Claude) or
-// per turn-completed (Codex) and batches them into one POST per N hops or
-// every ~250ms (whichever first). This endpoint accepts a batch + inserts
-// one llm_calls row per hop with the appropriate source ('byoa-claude' |
-// 'byoa-codex' | 'byoa-grok' | 'byoa-cursor' | 'byoa-opencode' | 'byoa-pi').
+// Per-hop ledger for native HTTP runtimes and BYOA daemons. Native calls
+// arrive individually with source='cloud'; daemons send bounded hop batches.
 // The server commits the bounded batch atomically; the daemon still treats an
 // HTTP/DB failure as best-effort so observability can never break the wake.
 runtimeRouter.post('/llm-calls', withAgent(async (c, req, res) => {
@@ -571,6 +569,7 @@ runtimeRouter.post('/llm-calls', withAgent(async (c, req, res) => {
       conversationId?: string | null
       model?: string
       usage?: import('./client.js').RuntimeTokenUsage | null
+      reasoningTokens?: number
       latencyMs?: number
       status?: 'ok' | 'rate_limited' | 'timeout' | 'failed'
       error?: string | null
@@ -583,7 +582,7 @@ runtimeRouter.post('/llm-calls', withAgent(async (c, req, res) => {
     || (body?.hops !== undefined && !Array.isArray(body.hops))) {
     res.status(400).json({ error: 'invalid LLM batch payload' }); return
   }
-  const source = normalizeByoaSource(body?.source)
+  const source = body?.source === 'cloud' ? 'cloud' as const : normalizeByoaSource(body?.source)
   const daemonVersion = typeof body?.daemonVersion === 'string' && body.daemonVersion.trim() ? body.daemonVersion.trim().slice(0, 32) : null
   const hops = Array.isArray(body?.hops) ? body!.hops : []
   if (hops.length === 0) { res.json({ ok: true, inserted: 0 }); return }
@@ -606,6 +605,7 @@ runtimeRouter.post('/llm-calls', withAgent(async (c, req, res) => {
       || (hop.model !== undefined && typeof hop.model !== 'string')
       || (hop.usage !== undefined && hop.usage !== null && !isRuntimeTokenUsage(hop.usage))
       || (hop.latencyMs !== undefined && !isNonNegativePgInteger(hop.latencyMs))
+      || (hop.reasoningTokens !== undefined && !isNonNegativePgInteger(hop.reasoningTokens))
       || (hop.status !== undefined && (typeof hop.status !== 'string' || !LLM_CALL_STATUSES.has(hop.status)))
       || (hop.error !== undefined && hop.error !== null && typeof hop.error !== 'string')
       || (hop.extras !== undefined && !isPlainRecord(hop.extras))) {
@@ -618,6 +618,8 @@ runtimeRouter.post('/llm-calls', withAgent(async (c, req, res) => {
   const KNOWN_PURPOSES = new Set([
     'agent-turn', 'inbox-triage', 'synthetic-wake-gate', 'agenda',
     'compaction', 'completion-verify', 'steer-summary',
+    'convene-speech', 'convene-decision', 'message-routing',
+    'palette', 'gender', 'avatar-image', 'agent-image',
   ])
   const records = hops.map((h) => {
     const purpose = (typeof h.purpose === 'string' && KNOWN_PURPOSES.has(h.purpose) ? h.purpose : 'agent-turn') as 'agent-turn'
@@ -636,6 +638,7 @@ runtimeRouter.post('/llm-calls', withAgent(async (c, req, res) => {
         cacheCreationTokens: h.usage.cacheCreationTokens ?? 0,
         outputTokens: h.usage.outputTokens ?? 0,
       } : null,
+      reasoningTokens: h.reasoningTokens ?? 0,
       latencyMs: typeof h.latencyMs === 'number' && Number.isFinite(h.latencyMs) ? h.latencyMs : 0,
       status: h.status ?? 'ok',
       error: h.error ?? null,

@@ -30,6 +30,11 @@ export function ensureSchemaOnce(): Promise<void> {
 /** Tables we wipe between tests. CASCADE handles FK constraints, but listing explicitly
  *  keeps the intent visible + lets us spot-check leakage. */
 const TABLES_TO_WIPE: readonly string[] = [
+  'integration_configs',
+  'integration_revisions',
+  'external_artifact_handoffs',
+  'external_artifact_versions',
+  'external_artifacts',
   'external_message_deliveries',
   'external_invocations',
   'external_sessions',
