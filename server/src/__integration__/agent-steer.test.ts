@@ -444,9 +444,13 @@ test('[integration] wake stream revalidates authorization before delivering an e
   assert.equal(frames.some((frame) => frame.event === 'wake'), false)
 })
 
-test('[integration] wire: scheduler.wakeAgent routes BOTH wake AND steer when agent is busy', async () => {
-  const agentId = `agent-${randomUUID().slice(0, 8)}`
+test('[integration] wire: scheduler.wakeAgent routes BOTH wake AND steer when agent is busy', async (t) => {
+  const { agentId } = await seedConvo()
   const res = makeFakeSseResponse()
+  t.after(async () => {
+    res.triggerClose()
+    await redis.del(busyKey(agentId))
+  })
   await attachWakeStream(agentId, res)
   await new Promise((r) => setTimeout(r, 100))
 
@@ -471,13 +475,12 @@ test('[integration] wire: scheduler.wakeAgent routes BOTH wake AND steer when ag
   const stPayload = JSON.parse(steerFrame!.data ?? '{}')
   assert.equal(stPayload.body, 'wait, change the plan')
 
-  await redis.del(busyKey(agentId))
-  res.triggerClose()
 })
 
-test('[integration] wire: scheduler.wakeAgent does NOT deliver steer when agent is idle', async () => {
-  const agentId = `agent-${randomUUID().slice(0, 8)}`
+test('[integration] wire: scheduler.wakeAgent does NOT deliver steer when agent is idle', async (t) => {
+  const { agentId } = await seedConvo()
   const res = makeFakeSseResponse()
+  t.after(() => res.triggerClose())
   await attachWakeStream(agentId, res)
   await new Promise((r) => setTimeout(r, 100))
 
@@ -500,7 +503,6 @@ test('[integration] wire: scheduler.wakeAgent does NOT deliver steer when agent 
     'NO steer event when agent is idle — message reaches via normal inbox',
   )
 
-  res.triggerClose()
 })
 
 // ── Fix #3: summarizer path (batch > SUMMARIZE_THRESHOLD) ─────────────
@@ -877,10 +879,15 @@ test('[integration] real HTTP wire: parseSseStream consumes attachWakeStream out
   }
 })
 
-test('[integration] rate limit: scheduler drops steers past 30/min — wake still fires', async () => {
-  const agentId = `agent-${randomUUID().slice(0, 8)}`
+test('[integration] rate limit: scheduler drops steers past 30/min — wake still fires', async (t) => {
+  const { agentId } = await seedConvo()
   await _resetSteerRateForTests(agentId)
   const res = makeFakeSseResponse()
+  t.after(async () => {
+    res.triggerClose()
+    await redis.del(busyKey(agentId))
+    await _resetSteerRateForTests(agentId)
+  })
   await attachWakeStream(agentId, res)
   await new Promise((r) => setTimeout(r, 100))
   await redis.set(busyKey(agentId), String(Date.now()), 'EX', 30)
@@ -903,9 +910,6 @@ test('[integration] rate limit: scheduler drops steers past 30/min — wake stil
   assert.equal(wakes, 35, 'wakes fire regardless of rate limit')
   assert.equal(steers, 30, 'steers capped at 30 per rolling 60s window')
 
-  await redis.del(busyKey(agentId))
-  await _resetSteerRateForTests(agentId)
-  res.triggerClose()
 })
 
 test('[integration] cursor tiebreaker: two messages at same created_at — only the steered one is marked read', async () => {
