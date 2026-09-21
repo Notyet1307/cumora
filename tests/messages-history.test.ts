@@ -6,6 +6,7 @@ import ts from 'typescript'
 import { create } from 'zustand'
 import type { ApiMessage } from '../src/api/client'
 import { applyReplyCountDelta } from '../src/lib/replyCount'
+import { artifactTimeline } from '../src/lib/artifactTimeline'
 import type { Message } from '../src/types'
 
 // Execute the actual store with an in-memory API, without loading the browser
@@ -57,6 +58,23 @@ function setup(last: number, cache: Message[] = messages(1, 80)) {
   const sequences = () => store.getState().byConvo.chat.map((m) => (m as ApiMessage).sequence)
   return { store, api, requests, sequences }
 }
+
+it('places a delivery event between loaded messages across calendar days', async () => {
+  const { store, api } = setup(2, [])
+  api.getMessages = async () => messages(1, 2).map((message, index) => ({
+    ...message, createdAt: `2026-09-${20 + index}T12:00:00.000Z`,
+  }))
+  await store.getState().loadConversation('chat')
+  const items = artifactTimeline(store.getState().byConvo.chat, [{
+    id: 'artifact', title: 'Report', ownerId: 'user', sourceConversationId: 'source',
+    inputRevision: 1, inputText: 'Question', latestVersion: 1,
+    expiresAt: '2026-09-28T12:00:00.000Z', expired: false, versions: [],
+    handoffs: [{ id: 'handoff', sourceVersion: 1, assigneeId: 'atlas', taskId: 'task',
+      instructions: 'Write report', status: 'assigned', outputVersion: null,
+      reviewNote: null, createdAt: '2026-09-20T18:00:00.000Z' }],
+  }], 'user', 'atlas', false)
+  assert.deepEqual(items.map(item => item.kind === 'message' ? item.message.id : item.handoff.id), ['m-1', 'handoff', 'm-2'])
+})
 
 describe('message history after reconnect', () => {
   for (const method of ['reloadConversation', 'loadConversation'] as const) {

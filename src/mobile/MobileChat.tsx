@@ -7,12 +7,15 @@ import { useApp } from '@/stores/app'
 import { useMe } from '@/stores/auth'
 import { useConversations, isMuted } from '@/stores/conversations'
 import { useParticipants } from '@/stores/participants'
-import { useMessages, sendUserMessage, messagesFor, toggleReaction, VIRTUOSO_FIRST_INDEX_BASE } from '@/stores/messages'
+import { useMessages, sendUserMessage, messagesFor, toggleReaction } from '@/stores/messages'
 import type { MessagesState } from '@/stores/messages'
 import { Avatar, AvatarStack } from '@/components/Avatar'
 import { MessageRow, TypingRow } from '@/components/Message'
 import { RichInput, type RichInputHandle } from '@/components/RichInput'
 import { ScrollToLatestButton } from '@/components/ScrollToLatestButton'
+import { ArtifactConversationContext, ArtifactStreamStatus, ArtifactTimelineAnchor, ArtifactTimelineCard, useArtifactConversation, useTimelineFirstIndex } from '@/components/ArtifactConversation'
+import { ArtifactReader } from '@/components/ArtifactReader'
+import { artifactTimeline, timelineMessageIndex, type ConversationTimelineItem } from '@/lib/artifactTimeline'
 import { IBack, IConvene, IMore, IClip, IAt, ISmile, ISend, ISearch } from '@/components/icons'
 import { api, type ApiAttachment } from '@/api/client'
 import type { Message, Participant } from '@/types'
@@ -45,24 +48,23 @@ export function MobileChat() {
   const hasMoreOlder = useMessages((s) => (convoId ? s.hasMoreOlder[convoId] ?? false : false))
   const loadingOlder = useMessages((s) => (convoId ? s.loadingOlder.has(convoId) : false))
   const loadOlder = useMessages((s) => s.loadOlder)
-  // Anchor for upward pagination — the store decrements this per prepend so
-  // Virtuoso holds scroll position when older history pages in.
-  const firstItemIndex = useMessages((s) => (convoId ? s.firstItemIndex[convoId] ?? VIRTUOSO_FIRST_INDEX_BASE : VIRTUOSO_FIRST_INDEX_BASE))
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const list = useMemo(
     () => messagesFor({ byConvo: byConvo ? { [convoId!]: byConvo } : {}, streaming } as MessagesState, convoId),
     [byConvo, streaming, convoId],
   )
-  // Drives the bottom-right "scroll to latest" pill — true means we're pinned
-  // at the bottom and the pill stays hidden. Note: there's also an existing
-  // `scrollToLatest` (declared below) that snaps with `behavior:'auto'` for the
-  // iOS-keyboard path; explicit user clicks want a smooth animation, so we
-  // keep a separate handler instead of reusing it.
+  const artifacts = useArtifactConversation(convoId)
+  const timeline = useMemo(() => artifactTimeline(list, artifacts.context.artifacts, artifacts.ownerId, artifacts.assigneeId, hasMoreOlder || byConvo === undefined),
+    [list, artifacts.context.artifacts, artifacts.ownerId, artifacts.assigneeId, hasMoreOlder, byConvo])
+  const firstItemIndex = useTimelineFirstIndex(timeline, artifacts.scope)
+  const [report, setReport] = useState<{ scope: string; artifactId: string; handoffId: string } | null>(null)
+  useEffect(() => { setReport(null) }, [artifacts.scope])
+  const openReport = useCallback((artifactId: string, handoffId: string) => {
+    setReport({ scope: artifacts.scope, artifactId, handoffId })
+  }, [artifacts.scope])
+  // Drives the bottom-right "scroll to latest" pill; reuse the instant keyboard
+  // snap below so variable-height rows cannot interrupt a smooth jump.
   const [atBottom, setAtBottom] = useState(true)
-  const smoothScrollToLatest = useCallback(() => {
-    if (list.length === 0) return
-    virtuosoRef.current?.scrollToIndex({ index: list.length - 1, align: 'end', behavior: 'smooth' })
-  }, [list.length])
   const conversations = useConversations((s) => s.list)
   const c = useMemo(() => conversations.find((x) => x.id === convoId), [conversations, convoId])
   const byId = useParticipants((s) => s.byId)
@@ -176,9 +178,9 @@ export function MobileChat() {
   const clearPendingJump = useApp((s) => s.clearPendingJump)
   useEffect(() => {
     if (!pendingJumpId) return
-    const index = list.findIndex((m) => m.id === pendingJumpId)
+    const index = timelineMessageIndex(timeline, pendingJumpId)
     if (index >= 0) {
-      virtuosoRef.current?.scrollToIndex({ index, align: 'center', behavior: 'smooth' })
+      virtuosoRef.current?.scrollToIndex({ index, align: 'center', behavior: 'auto' })
       const targetId = pendingJumpId
       const deadline = Date.now() + 800
       const tryFlash = (): void => {
@@ -193,7 +195,7 @@ export function MobileChat() {
       window.setTimeout(tryFlash, 80)
     }
     clearPendingJump()
-  }, [pendingJumpId, list, clearPendingJump])
+  }, [pendingJumpId, timeline, clearPendingJump])
 
   // Long-press tapback state. When set, MobileMessageTapback renders
   // an iOS Messages-style reaction strip + action menu anchored to
@@ -207,10 +209,10 @@ export function MobileChat() {
   // so the snap-to-bottom happens at the right moment regardless of
   // which fires first / when the layout settles.
   const scrollToLatest = useCallback(() => {
-    const n = list.length
+    const n = timeline.length
     if (n === 0) return
     virtuosoRef.current?.scrollToIndex({ index: n - 1, align: 'end', behavior: 'auto' })
-  }, [list.length])
+  }, [timeline.length])
   useEffect(() => {
     const vv = window.visualViewport
     if (!vv) return
@@ -453,10 +455,7 @@ export function MobileChat() {
     // newly-appended row (frame 1) before we scroll to it (frame 2).
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        const n = useMessages.getState().byConvo?.[convoId]?.length ?? 0
-        if (n > 0) {
-          virtuosoRef.current?.scrollToIndex({ index: n - 1, align: 'end', behavior: 'smooth' })
-        }
+        virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
       })
     })
   }
@@ -487,6 +486,7 @@ export function MobileChat() {
   const agents = memberPs.filter((p) => p.kind === 'agent')
 
   return (
+    <ArtifactConversationContext.Provider value={artifacts.context}>
     <section className="flex flex-col h-full bg-cloud overflow-x-hidden">
       {/* Header */}
       <header
@@ -579,23 +579,25 @@ export function MobileChat() {
           longer mount every bubble at once; rows outside the viewport
           stay un-rendered, and the older-history pager fires when the
           user scrolls past the top. */}
+      <ArtifactTimelineAnchor items={timeline} scope={artifacts.scope} atBottom={atBottom} streamRef={streamRef} virtuosoRef={virtuosoRef}>
       <div
         ref={streamRef}
-        className="flex-1 relative"
+        className="min-h-0 flex-1 relative"
         style={{
           background: 'var(--chat-wash)',
         }}
       >
-        <Virtuoso
+        <Virtuoso<ConversationTimelineItem, StreamCtx>
+          key={artifacts.scope}
           ref={virtuosoRef}
           className="h-full"
-          data={list}
+          data={timeline}
           firstItemIndex={firstItemIndex}
           // Pin to the bottom on first mount + every append. 'smooth' would
           // animate every WS streaming chunk and feel laggy; 'auto' jumps
           // for new messages while leaving the user free to scroll up.
           followOutput="auto"
-          initialTopMostItemIndex={Math.max(0, list.length - 1)}
+          initialTopMostItemIndex={Math.max(0, timeline.length - 1)}
           startReached={onStartReached}
           // Padding lives inside Header / Footer so virtuoso can measure the
           // first/last items without a wrapping flex container fighting it.
@@ -605,7 +607,9 @@ export function MobileChat() {
           // tick and was a primary cause of scroll-up jitter. See StreamHeader.
           components={STREAM_COMPONENTS}
           context={streamCtx}
-          itemContent={(_index, m) => {
+          itemContent={(_index, item) => {
+            if (item.kind !== 'message') return <ArtifactTimelineCard event={item} onOpen={openReport} />
+            const m = item.message
             const author = byId[m.authorId]
             // System / whisper rows render without a resolved author (e.g. the
             // calendar-fired notice has a synthetic system author id).
@@ -625,7 +629,7 @@ export function MobileChat() {
               />
             )
           }}
-          computeItemKey={(_index, m) => m.clientId ?? m.id}
+          computeItemKey={(_index, item) => item.key}
           // First-pass height estimate for rows Virtuoso hasn't measured yet.
           // A real mobile row (avatar + author line + a few lines of body, and
           // often a card) lands well above the old 88px guess, so every
@@ -645,8 +649,9 @@ export function MobileChat() {
         {/* Bottom-right "scroll to latest" pill — only when the user has
             scrolled up off the bottom. Sits just above the composer with a
             larger inset than desktop so it clears the soft-keyboard safe area. */}
-        <ScrollToLatestButton visible={!atBottom} onClick={smoothScrollToLatest} bottomOffset={20} />
+        <ScrollToLatestButton visible={!atBottom} onClick={scrollToLatest} bottomOffset={20} />
       </div>
+      </ArtifactTimelineAnchor>
       {/* Composer */}
       <div
         className="border-t border-ink-100 bg-cloud px-3 pt-1.5 kb-aware"
@@ -934,6 +939,8 @@ export function MobileChat() {
         onClose={() => setTapback(null)}
       />
     </section>
+    {report?.scope === artifacts.scope && <ArtifactReader artifactId={report.artifactId} handoffId={report.handoffId} onClose={() => setReport(null)} />}
+    </ArtifactConversationContext.Provider>
   )
 }
 
@@ -964,16 +971,17 @@ function StreamHeader({ context }: { context?: StreamCtx }) {
   return (
     <div className="px-3 pt-4 flex flex-col gap-3">
       {hasMoreOlder ? (
-        <div className="self-center py-1 px-2.5 rounded-full text-[10.5px] font-medium text-ink-400">
+        <div className="flex h-6 items-center self-center px-2.5 rounded-full text-[10.5px] font-medium text-ink-400">
           {loadingOlder ? t('chat.loadingEarlier') : ' '}
         </div>
       ) : (
-        <div className="flex items-center gap-3 text-ink-300 text-[10.5px] font-bold tracking-[0.08em] uppercase">
+        <div className="flex h-6 items-center gap-3 text-ink-300 text-[10.5px] font-bold tracking-[0.08em] uppercase">
           <span className="flex-1 h-px bg-gradient-to-r from-transparent via-ink-100 to-transparent" />
           {t('chat.beginning')}
           <span className="flex-1 h-px bg-gradient-to-r from-transparent via-ink-100 to-transparent" />
         </div>
       )}
+      <ArtifactStreamStatus />
     </div>
   )
 }
@@ -1012,6 +1020,7 @@ function MessageRowMobileShell({
   const press = useLongPress(onLongPress)
   return (
     <div
+      data-timeline-key={`message:${msg.clientId ?? msg.id}`}
       className="px-3 py-2"
       style={{
         userSelect: 'none',

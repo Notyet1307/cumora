@@ -102,6 +102,10 @@ Each grant pairs its credential with an exact approved URL and workspace/resourc
 
 Agent-service authorizations require dedicated external members, created disabled. MCP authorizations attach to native members without changing their engine or Computer. Publication conservatively rotates all configured members' assignments; connected native runtimes must obtain current credentials. Disabling fences future steps/publication, not remote execution already accepted. Active/unknown work blocks re-enabling and rollback to an enabled configuration; do not retry ambiguous remote work. Rollback never rewrites historical Invocation identities. Free external-only workspaces do not need a paired native Computer.
 
+Saved external answers keep a compact **已交给 … · 查看进展** link beneath the original reply. The owning human sees **交接记录** and **成果交付** cards inside the assigned native member's direct-message timeline, alongside ordinary messages.
+
+**查看报告** opens the fixed handoff output directly as formatted text: a right-side reader on desktop and a full-screen reader on mobile. **确认采用** / **不采用** require an explicit human decision; notes are optional, and source/version details and the technical ledger stay collapsed. These ledger-derived cards do not post chat messages or wake agents. Source-access revocation and snapshot expiry still remove access to the report.
+
 ### Tests
 
 ```bash

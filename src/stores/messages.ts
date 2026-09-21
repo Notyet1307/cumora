@@ -21,7 +21,7 @@ export const VIRTUOSO_FIRST_INDEX_BASE = 1_000_000
 export interface MessagesState {
   byConvo: Record<string, Message[]>
   /** in-flight streaming bodies, keyed by message id */
-  streaming: Record<string, { body: string; conversationId: string; authorId: string; sequence: number }>
+  streaming: Record<string, { body: string; conversationId: string; authorId: string; sequence: number; createdAt?: string }>
   /** which agents are currently typing in each conversation */
   typing: Record<string, string[]>
   loaded: Set<string>
@@ -268,6 +268,7 @@ function fromApi(m: ApiMessage): Message {
     kind: m.kind as Message['kind'],
     body: m.body,
     at,
+    createdAt: m.createdAt ?? (m.at && ISO_RE.test(m.at) ? m.at : undefined),
     reactions: deriveMineForReactions(m.reactions),
     tool: raw.tool ?? undefined,
     attachment: raw.attachment ?? undefined,
@@ -617,6 +618,7 @@ export const useMessages = create<MessagesState>((set, get) => ({
               conversationId: e.conversationId,
               authorId: e.authorId,
               sequence: e.sequence,
+              createdAt: cur?.createdAt ?? new Date().toISOString(),
             },
           },
         }
@@ -673,7 +675,8 @@ export const messagesFor = (s: MessagesState, convoId: string | null): Message[]
       authorId: x.authorId,
       kind: 'text' as const,
       body: x.body,
-      at: timeFromIso(),
+      at: timeFromIso(x.createdAt),
+      createdAt: x.createdAt,
     }))
   if (streaming.length === 0) return base
   return [...base, ...streaming]
@@ -741,6 +744,7 @@ export async function sendUserMessage(
     kind: 'text',
     body: v,
     at: timeFromIso(),
+    createdAt: new Date().toISOString(),
     attachment: attachment
       ? {
           name: attachment.name,

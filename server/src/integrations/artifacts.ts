@@ -268,7 +268,7 @@ export class ArtifactService {
     if (h.input_revision !== root.input_revision || h.status === 'cancelled' || h.status === 'stale') throw new ArtifactError(409, 'artifact_handoff_revoked')
   }
 
-  async list(actor: ArtifactActor): Promise<ArtifactSummary[]> {
+  async list(actor: ArtifactActor): Promise<ArtifactView[]> {
     actorInput(actor)
     const human = await this.#db.query(`SELECT p.id FROM participants p
       JOIN users u ON u.id=p.id AND u.deleted_at IS NULL AND u.suspended_at IS NULL
@@ -278,10 +278,10 @@ export class ArtifactService {
     if (!human.rowCount) throw new ArtifactError(403, 'artifact_owner_required')
     // Never return another human's metadata, or the room/input to a delegated agent.
     const roots = (await this.#db.query<{ id: string }>('SELECT id FROM external_artifacts WHERE company_id=$1 AND owner_id=$2 ORDER BY created_at DESC,id', [actor.companyId, actor.subjectId])).rows
-    const results: ArtifactSummary[] = []
+    const results: ArtifactView[] = []
     for (const root of roots) {
       try {
-        const item = await this.#withArtifact(actor, root.id, { owner: true }, async (_tx, row) => summary(row))
+        const item = await this.#withArtifact(actor, root.id, { owner: true }, (tx, row) => this.#view(tx, row))
         results.push(item)
       } catch (error) {
         if (!(error instanceof ArtifactError) || ![403, 404].includes(error.status)) throw error

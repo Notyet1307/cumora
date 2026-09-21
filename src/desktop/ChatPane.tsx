@@ -5,7 +5,7 @@ import { EMPTY_DRAFT, type ComposerDraft } from '@/stores/composerDrafts'
 import { useMe } from '@/stores/auth'
 import { isMuted, useConversations } from '@/stores/conversations'
 import { useParticipants } from '@/stores/participants'
-import { useMessages, sendUserMessage, messagesFor, VIRTUOSO_FIRST_INDEX_BASE } from '@/stores/messages'
+import { useMessages, sendUserMessage, messagesFor } from '@/stores/messages'
 import type { MessagesState } from '@/stores/messages'
 import { api, type ApiAttachment } from '@/api/client'
 import { Avatar, AvatarStack } from '@/components/Avatar'
@@ -22,6 +22,9 @@ import { isImeComposing } from '@/lib/keyboard'
 import { MessageRow, TypingRow } from '@/components/Message'
 import { PollComposer } from '@/components/PollComposer'
 import { ScrollToLatestButton } from '@/components/ScrollToLatestButton'
+import { ArtifactConversationContext, ArtifactStreamStatus, ArtifactTimelineAnchor, ArtifactTimelineCard, useArtifactConversation, useTimelineFirstIndex } from '@/components/ArtifactConversation'
+import { ArtifactReader } from '@/components/ArtifactReader'
+import { artifactTimeline, timelineMessageIndex, type ConversationTimelineItem } from '@/lib/artifactTimeline'
 import { ISearch, IPin, IClip, IAt, ISmile, ISend, IConvene } from '@/components/icons'
 import type { Participant } from '@/types'
 import { useT } from '@/lib/i18n'
@@ -1777,19 +1780,26 @@ export function ChatPane() {
   // the bottom-right "scroll to latest" pill that appears once the user
   // scrolls up. Default true so the pill stays hidden on first mount.
   const [atBottom, setAtBottom] = useState(true)
-  const scrollToLatest = useCallback(() => {
-    if (list.length === 0) return
-    virtuosoRef.current?.scrollToIndex({ index: list.length - 1, align: 'end', behavior: 'smooth' })
-  }, [list.length])
 
   // Older-history pager — virtualization keeps the DOM small; this fetches
   // the next page upward when the user scrolls past the top.
   const hasMoreOlder = useMessages((s) => (convoId ? s.hasMoreOlder[convoId] ?? false : false))
   const loadingOlder = useMessages((s) => (convoId ? s.loadingOlder.has(convoId) : false))
   const loadOlder = useMessages((s) => s.loadOlder)
-  // Anchor for upward pagination — the store decrements this per prepend so
-  // Virtuoso holds scroll position when older history pages in.
-  const firstItemIndex = useMessages((s) => (convoId ? s.firstItemIndex[convoId] ?? VIRTUOSO_FIRST_INDEX_BASE : VIRTUOSO_FIRST_INDEX_BASE))
+  const artifacts = useArtifactConversation(convoId)
+  const timeline = useMemo(() => artifactTimeline(list, artifacts.context.artifacts, artifacts.ownerId, artifacts.assigneeId, hasMoreOlder || byConvo === undefined),
+    [list, artifacts.context.artifacts, artifacts.ownerId, artifacts.assigneeId, hasMoreOlder, byConvo])
+  const firstItemIndex = useTimelineFirstIndex(timeline, artifacts.scope)
+  const [report, setReport] = useState<{ scope: string; artifactId: string; handoffId: string } | null>(null)
+  useEffect(() => { setReport(null) }, [artifacts.scope])
+  const openReport = useCallback((artifactId: string, handoffId: string) => {
+    setReport({ scope: artifacts.scope, artifactId, handoffId })
+  }, [artifacts.scope])
+  const scrollToLatest = useCallback(() => {
+    if (timeline.length === 0) return
+    virtuosoRef.current?.scrollToIndex({ index: timeline.length - 1, align: 'end', behavior: 'auto' })
+  }, [timeline.length])
+  const streamContext = useMemo(() => ({ hasMoreOlder, loadingOlder }), [hasMoreOlder, loadingOlder])
   const onStartReached = useCallback(() => {
     if (!convoId) return
     if (!hasMoreOlder || loadingOlder) return
@@ -1819,13 +1829,13 @@ export function ChatPane() {
   // Scroll the current hit into view. We virtualize the message list so a
   // matched row may not even be mounted yet — virtuoso's scrollToIndex
   // mounts and centers it in one go.
+  // Instant jumps can retry after variable-height rows are measured; smooth jumps can stop short.
+  const searchMessageId = matchedIds[matchIdx]
+  const searchTimelineIndex = searchMessageId ? timelineMessageIndex(timeline, searchMessageId) : -1
   useEffect(() => {
-    const id = matchedIds[matchIdx]
-    if (!id) return
-    const index = list.findIndex((m) => m.id === id)
-    if (index < 0) return
-    virtuosoRef.current?.scrollToIndex({ index, align: 'center', behavior: 'smooth' })
-  }, [matchedIds, matchIdx, list])
+    if (searchTimelineIndex < 0) return
+    virtuosoRef.current?.scrollToIndex({ index: searchTimelineIndex, align: 'center', behavior: 'auto' })
+  }, [searchTimelineIndex])
 
   // Centralized "jump to message" — quote clicks and `#N` chips both set
   // useApp.pendingJumpMessageId and we resolve it here. virtuoso.scrollToIndex
@@ -1836,11 +1846,11 @@ export function ChatPane() {
   const clearPendingJump = useApp((s) => s.clearPendingJump)
   useEffect(() => {
     if (!pendingJumpId) return
-    const index = list.findIndex((m) => m.id === pendingJumpId)
+    const index = timelineMessageIndex(timeline, pendingJumpId)
     if (index >= 0) {
-      virtuosoRef.current?.scrollToIndex({ index, align: 'center', behavior: 'smooth' })
-      // Wait for Virtuoso to mount the row (smooth scroll + recycle ≈ 0–500ms),
-      // then flash it. Poll briefly because mount timing varies.
+      virtuosoRef.current?.scrollToIndex({ index, align: 'center', behavior: 'auto' })
+      // Wait for Virtuoso to mount the row, then flash it.
+      // Poll briefly because measurement and recycle timing vary.
       const targetId = pendingJumpId
       const deadline = Date.now() + 800
       const tryFlash = (): void => {
@@ -1856,7 +1866,7 @@ export function ChatPane() {
     }
     // Clear after we've handled it so a repeat click on the same id re-fires.
     clearPendingJump()
-  }, [pendingJumpId, list, clearPendingJump])
+  }, [pendingJumpId, timeline, clearPendingJump])
   // Auto-focus the search input when the bar opens.
   useEffect(() => {
     if (searchOpen) {
@@ -1882,8 +1892,8 @@ export function ChatPane() {
   // at render time — by the time the effect runs they're already equal. The
   // flag stays true until messages actually land and we do the instant snap.
   const pendingConvoSwitchRef = useRef(true)
-  if (lastConvoRef.current !== convoId) {
-    lastConvoRef.current = convoId
+  if (lastConvoRef.current !== artifacts.scope) {
+    lastConvoRef.current = artifacts.scope
     initialIdsRef.current = new Set(list.map((m) => m.id))
     pendingConvoSwitchRef.current = true
     animatedIdsRef.current = new Set()
@@ -1897,13 +1907,13 @@ export function ChatPane() {
     // conversation that already had messages loaded (initialTopMostItemIndex
     // only fires on first mount, not on convo switches within the same
     // mounted instance).
-    if (list.length === 0) return
+    if (timeline.length === 0) return
     const isConvoSwitch = pendingConvoSwitchRef.current
     pendingConvoSwitchRef.current = false
     if (isConvoSwitch) {
-      virtuosoRef.current?.scrollToIndex({ index: list.length - 1, align: 'end', behavior: 'auto' })
+      virtuosoRef.current?.scrollToIndex({ index: timeline.length - 1, align: 'end', behavior: 'auto' })
     }
-  }, [list.length, convoId])
+  }, [timeline.length, artifacts.scope])
 
   // IMPORTANT: every hook in this component must run on EVERY render —
   // React enforces a stable hook order. The "no conversation selected"
@@ -1940,6 +1950,7 @@ export function ChatPane() {
   }
 
   return (
+    <ArtifactConversationContext.Provider value={artifacts.context}>
     <main
       className={cn(
         'grid overflow-hidden',
@@ -2021,6 +2032,7 @@ export function ChatPane() {
           </button>
         </div>
       )}
+      <ArtifactTimelineAnchor items={timeline} scope={artifacts.scope} atBottom={atBottom} streamRef={streamRef} virtuosoRef={virtuosoRef}>
       <div ref={streamRef} className="min-h-0 relative">
         {/* Empty-state branches: an error from the initial fetch wins over the
             loader (a stale spinner under an error message would be confusing).
@@ -2028,22 +2040,23 @@ export function ChatPane() {
             have landed we let the regular list take over so a transient WS
             reconnect blip doesn't yank the conversation out from under the
             user. */}
-        {list.length === 0 && loadError ? (
+        {timeline.length === 0 && loadError ? (
           <div className="px-6 py-6">
             <ThreadError message={loadError} onRetry={() => retryLoad(convoId)} />
           </div>
-        ) : list.length === 0 && showLoader ? (
+        ) : timeline.length === 0 && showLoader ? (
           <div className="px-6 py-6">
             <ThreadLoader />
           </div>
         ) : (
-          <Virtuoso
+          <Virtuoso<ConversationTimelineItem, DesktopStreamContext>
+            key={artifacts.scope}
             ref={virtuosoRef}
             className="h-full"
-            data={list}
+            data={timeline}
             firstItemIndex={firstItemIndex}
             followOutput="auto"
-            initialTopMostItemIndex={Math.max(0, list.length - 1)}
+            initialTopMostItemIndex={Math.max(0, timeline.length - 1)}
             startReached={onStartReached}
             atBottomStateChange={setAtBottom}
             // Initial-height hint so Virtuoso's first-pass sizing is
@@ -2054,33 +2067,19 @@ export function ChatPane() {
             // into the scroll jitter users see.
             defaultItemHeight={96}
             increaseViewportBy={{ top: 800, bottom: 800 }}
-            components={{
-              Header: () => (
-                <div className="px-6 pt-6 flex flex-col gap-2">
-                  {hasMoreOlder ? (
-                    <div className="self-center py-1 px-2.5 rounded-full text-[10.5px] font-medium text-ink-400">
-                      {loadingOlder ? t('chat.loadingEarlier') : ' '}
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-3 text-ink-300 text-[11px] font-bold tracking-[0.08em] uppercase">
-                      <span className="flex-1 h-px bg-gradient-to-r from-transparent via-ink-100 to-transparent" />
-                      {t('chat.beginning')}
-                      <span className="flex-1 h-px bg-gradient-to-r from-transparent via-ink-100 to-transparent" />
-                    </div>
-                  )}
-                </div>
-              ),
-              Footer: () => <div className="h-3" />,
-            }}
-            computeItemKey={(_index, m) => m.clientId ?? m.id}
-            itemContent={(i, m) => {
+            components={DESKTOP_STREAM_COMPONENTS}
+            context={streamContext}
+            computeItemKey={(_index, item) => item.key}
+            itemContent={(i, item) => {
+              if (item.kind !== 'message') return <ArtifactTimelineCard event={item} onOpen={openReport} />
+              const m = item.message
               const author = byId[m.authorId]
               // System / whisper rows render without a resolved author (e.g. the
               // calendar-fired notice has a synthetic system author id). Only
               // gate real authored messages on the participant being loaded.
               if (!author && m.kind !== 'system' && m.kind !== 'whisper-link') return <div className="h-0" />
               const wasInitial = initialIdsRef.current?.has(m.id) ?? false
-              const delay = wasInitial ? Math.min(i * 30, 200) : 0
+              const delay = wasInitial ? Math.min((i - firstItemIndex) * 30, 200) : 0
               // Animate a message's rise-in at most once per convo session, so a
               // Virtuoso remount (scroll / quote-jump) doesn't replay the fade.
               const firstAnimation = !animatedIdsRef.current.has(m.id)
@@ -2089,6 +2088,7 @@ export function ChatPane() {
               const isCurrent = isMatch && matchedIds[matchIdx] === m.id
               return (
                 <div
+                  data-timeline-key={item.key}
                   data-msg-id={m.id}
                   className={cn(
                     'px-6 py-[9px] rounded-[10px] transition-shadow',
@@ -2107,7 +2107,36 @@ export function ChatPane() {
             the composer's top edge so it doesn't fight the typing area. */}
         <ScrollToLatestButton visible={!atBottom} onClick={scrollToLatest} />
       </div>
+      </ArtifactTimelineAnchor>
       <Composer convoId={convoId} typingNames={typingAgents.map((a) => a.name)} />
     </main>
+    {report?.scope === artifacts.scope && <ArtifactReader artifactId={report.artifactId} handoffId={report.handoffId} onClose={() => setReport(null)} />}
+    </ArtifactConversationContext.Provider>
   )
 }
+
+type DesktopStreamContext = { hasMoreOlder: boolean; loadingOlder: boolean }
+
+function DesktopStreamHeader({ context }: { context?: DesktopStreamContext }) {
+  const t = useT()
+  return <div className="px-6 pt-6 flex flex-col gap-2">
+    {context?.hasMoreOlder ? (
+      <div className="flex h-6 items-center self-center px-2.5 rounded-full text-[10.5px] font-medium text-ink-400">
+        {context.loadingOlder ? t('chat.loadingEarlier') : ' '}
+      </div>
+    ) : (
+      <div className="flex h-6 items-center gap-3 text-ink-300 text-[11px] font-bold tracking-[0.08em] uppercase">
+        <span className="flex-1 h-px bg-gradient-to-r from-transparent via-ink-100 to-transparent" />
+        {t('chat.beginning')}
+        <span className="flex-1 h-px bg-gradient-to-r from-transparent via-ink-100 to-transparent" />
+      </div>
+    )}
+    <ArtifactStreamStatus />
+  </div>
+}
+
+function DesktopStreamFooter() {
+  return <div className="h-3" />
+}
+
+const DESKTOP_STREAM_COMPONENTS = { Header: DesktopStreamHeader, Footer: DesktopStreamFooter }

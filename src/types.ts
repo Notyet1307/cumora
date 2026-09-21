@@ -278,6 +278,8 @@ export interface Message {
   kind: MessageKind
   body: string
   at: string
+  /** Full timestamp for ordering with conversation events; `at` is display-only. */
+  createdAt?: string
   reactions?: ReactionEntry[]
   externalDeliveries?: ExternalDeliveryStatus[]
   externalResult?: ExternalAnswer

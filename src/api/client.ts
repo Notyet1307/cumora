@@ -6,7 +6,7 @@ import type {
   CalendarReminderChannel, ComputerKind, ComputerStatus, DetectedEngine,
   EngineDefaultsMap, EngineId, Message, RecurrenceRule, Status,
 } from '@/types'
-import type { ArtifactContent, ArtifactHandoff, ArtifactSummary, ArtifactView, CaptureArtifactInput, CreateArtifactHandoffInput } from '../../shared/external-artifacts'
+import type { ArtifactContent, ArtifactHandoff, ArtifactView, CaptureArtifactInput, CreateArtifactHandoffInput } from '../../shared/external-artifacts'
 
 const DEVTOOLS_KEY = 'cumora.devtools.enabled'
 const SERVER_URL_KEY = 'cumora.serverUrl'
@@ -1135,7 +1135,7 @@ export const api = {
     status: string; reason?: string; expired?: boolean; answer?: string
     presentation?: Omit<NonNullable<Message['externalResult']>, 'deliveryId' | 'invocationId'> & { body: string }
   }>(`/external-deliveries/${encodeURIComponent(id)}`),
-  listExternalArtifacts: () => http<{ artifacts: ArtifactSummary[] }>('/external-artifacts'),
+  listExternalArtifacts: () => http<{ artifacts: ArtifactView[] }>('/external-artifacts'),
   captureExternalArtifact: (input: CaptureArtifactInput) =>
     http<ArtifactView>('/external-artifacts', { method: 'POST', body: JSON.stringify(input) }),
   getExternalArtifact: (id: string) => http<ArtifactView>(`/external-artifacts/${encodeURIComponent(id)}`),
