@@ -75,7 +75,7 @@ function parseConfig(input: unknown, companyId: string): BindingConfig {
     const subjectId = (b.subjectIds as string[])[0]
     policy(!subjects.has(subjectId)); subjects.add(subjectId)
     if (capability === 'mcp.tools') {
-      policy(Array.isArray(b.tools) && b.tools.length > 0 && b.tools.length <= 32)
+      policy(Array.isArray(b.tools) && b.tools.length > 0 && b.tools.length <= 64)
       for (const tool of b.tools as unknown[]) {
         const t = shape(tool, ['name', 'inputSchema', 'readOnly'], ['outputSchema'])
         policy(identifier(t.name) && t.readOnly === true)

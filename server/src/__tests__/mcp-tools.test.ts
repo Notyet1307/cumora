@@ -101,6 +101,22 @@ function errorCode(code: string, outcome?: string) {
   return (error: unknown) => error instanceof McpToolError && error.code === code && (!outcome || error.outcome === outcome)
 }
 
+test('up to 64 reviewed tools remain exclusive to their authorized member', async t => {
+  const { state, initial } = await fixture(t)
+  const binding = initial.bindings[0]
+  assert.equal(binding.capabilityId, 'mcp.tools')
+  if (binding.capabilityId !== 'mcp.tools') throw new Error('fixture binding')
+  binding.tools = Array.from({ length: 64 }, (_, i) => ({ name: `lookup_${i}`, inputSchema, outputSchema, readOnly: true }))
+  state.tools = binding.tools.map(tool => ({ name: tool.name, inputSchema, outputSchema }))
+  const dispatcher = new McpToolDispatcher(new BindingResolver(initial, { 'mcp-key': secret }), async () => {})
+  assert.equal((await dispatcher.list(actor)).tools.length, 64)
+  await assert.rejects(dispatcher.list({ ...actor, subjectId: 'other-member' }), errorCode('denied'))
+  await assert.rejects(dispatcher.call(actor, 'erase', {}), errorCode('denied'))
+  assert.equal(state.calls.length, 0)
+  binding.tools.push({ name: 'lookup_64', inputSchema, outputSchema, readOnly: true })
+  assert.throws(() => new BindingResolver(initial, { 'mcp-key': secret }))
+})
+
 test('approved read-only grant, not advertised hints, controls real MCP discovery and calls', async t => {
   const { state, dispatcher } = await fixture(t)
   const listed = await dispatcher.list(actor)

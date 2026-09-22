@@ -225,7 +225,7 @@ function BindingForm({ binding, view, companyId, busy, onSave, onCancel }: {
             <Field label={t('integrations.outputSchema')}><textarea className={`${inputClass} font-mono`} rows={3} value={tool.outputSchema} onChange={(event) => setTools(tools.map((item, i) => i === index ? { ...item, outputSchema: event.target.value } : item))} /></Field>
             <button type="button" className={buttonClass} onClick={() => { setTools(tools.filter((_, i) => i !== index)); setReviewed(false) }}>{t('integrations.removeTool')}</button>
           </div>)}
-          <button type="button" className={buttonClass} disabled={tools.length >= Math.min(32, target?.toolNames.length ?? 0)} onClick={() => { setTools([...tools, { name: '', inputSchema: '', outputSchema: '' }]); setReviewed(false) }}>{t('integrations.addTool')}</button>
+          <button type="button" className={buttonClass} disabled={tools.length >= Math.min(64, target?.toolNames.length ?? 0)} onClick={() => { setTools([...tools, { name: '', inputSchema: '', outputSchema: '' }]); setReviewed(false) }}>{t('integrations.addTool')}</button>
         </fieldset>}
         <label className="flex items-start gap-2 text-[12px] text-ink-700"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{t('integrations.enabledAfterSave')}</label>
         <label className="flex items-start gap-2 text-[12px] leading-relaxed text-ink-700"><input type="checkbox" className="mt-0.5 shrink-0" required checked={reviewed} onChange={(event) => { event.stopPropagation(); setReviewed(event.target.checked) }} />{t(isMcp ? 'integrations.reviewTools' : 'integrations.reviewApproval')}</label>

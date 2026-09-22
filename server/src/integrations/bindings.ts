@@ -148,7 +148,7 @@ export class BindingResolver {
         approvalIdentity = [a.authorizationVersion, a.tenantId, a.effectiveConfigDigest, a.cardSha256, a.protocolVersion]
       }
       if (b.capabilityId === 'mcp.tools') {
-        requireConfig(b.tools.length > 0 && b.tools.length <= 32 && new Set(b.tools.map(t => t?.name)).size === b.tools.length)
+        requireConfig(b.tools.length > 0 && b.tools.length <= 64 && new Set(b.tools.map(t => t?.name)).size === b.tools.length)
         for (const t of b.tools) requireConfig(t && /^[a-zA-Z0-9_.-]{1,128}$/.test(t.name) && t.readOnly === true
           && t.inputSchema && typeof t.inputSchema === 'object' && !Array.isArray(t.inputSchema) && t.inputSchema.type === 'object'
           && (t.outputSchema === undefined || (t.outputSchema && typeof t.outputSchema === 'object' && !Array.isArray(t.outputSchema) && t.outputSchema.type === 'object')))
