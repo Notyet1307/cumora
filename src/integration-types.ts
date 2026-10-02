@@ -49,3 +49,21 @@ export interface IntegrationProbeResult {
   business: IntegrationCheckStatus
   code: string
 }
+
+/** Bounded, untrusted metadata; advertised capabilities are not execution proof. */
+export interface A2ACardSummary {
+  name: string
+  description: string
+  version: string
+  protocolVersion: '0.3.0'
+  cardSha256: string
+  skill: { id: string; name: string; description: string; tags: string[] }
+  inputModes: string[]
+  outputModes: string[]
+  advertisedCapabilities: { streaming?: boolean; pushNotifications?: boolean; stateTransitionHistory?: boolean }
+}
+export interface A2ADiscovery {
+  revision: number
+  target: IntegrationTarget
+  card: A2ACardSummary
+}

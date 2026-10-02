@@ -23,6 +23,7 @@ const company = 'c-e5-test', user = 'u-e5-test', secret = 'e5-test-private-crede
 let server: Server, remote: Server, origin: string, remoteUrl: string, digest: string
 let management: IntegrationManagement, member: MemberAgent, memberId: string, calls = 0
 let beforeGenerate: (() => Promise<void>) | undefined
+let beforeCard: (() => Promise<void>) | undefined, cardReads = 0
 let grants: IntegrationTrustGrant[]
 
 async function listen(app: express.Express) {
@@ -65,6 +66,7 @@ before(async () => {
   const reference = createReferenceReportAgent({ baseUrl: remoteUrl, apiKey: secret, generate: async ({ input }) => {
     calls++; await beforeGenerate?.(); return `Complete synthetic answer: ${input}`
   } })
+  app.use('/.well-known/agent-card.json', async (_req, _res, next) => { cardReads++; await beforeCard?.(); next() })
   app.use(reference.app)
   digest = a2aCardSha256(reference.card)
   grants = [{ secretRef: 'report-key', credentialRevision: '1', value: secret, companyIds: [company], backend: 'a2a',
@@ -74,7 +76,7 @@ before(async () => {
 })
 beforeEach(async () => {
   await resetAllTables()
-  calls = 0; beforeGenerate = undefined
+  calls = 0; beforeGenerate = undefined; beforeCard = undefined; cardReads = 0
   await pool.query("INSERT INTO companies(id,name,slug,owner_user_id) VALUES($1,'E5 fixture','e5-fixture',$2)", [company, user])
   await seedUserMembership(user, company)
   management = new IntegrationManagement(pool, grants)
@@ -87,6 +89,95 @@ after(async () => {
   remote.closeAllConnections()
   await new Promise<void>(resolve => remote.close(() => resolve()))
   await teardownAll(server)
+})
+
+test('A2A onboarding discovery is read-only and accepts only exact workspace-approved targets', async () => {
+  const initial = await management.view(company, user)
+  const target = initial.targets[0]
+  const discovered = await request('POST', '/integrations/a2a/discover', { revision: initial.revision, target })
+  assert.equal(discovered.status, 200)
+  const card = discovered.body.card
+  assert.ok(card && typeof card === 'object' && 'cardSha256' in card)
+  assert.equal(card.cardSha256, digest)
+  assert.equal(JSON.stringify(discovered.body).includes(secret), false)
+  assert.equal(cardReads, 1)
+  assert.equal(calls, 0)
+  assert.deepEqual(await management.view(company, user), initial)
+  for (const changed of [
+    { ...target, baseUrl: 'http://127.0.0.1:9/a2a' },
+    { ...target, baseUrl: 'https://unapproved.invalid/a2a' },
+    { ...target, secretRef: 'another-key' },
+    { ...target, credentialRevision: '2' },
+    { ...target, remoteAgentIds: ['another-agent'] },
+    { ...target, backend: 'mcp' },
+    { ...target, apiKey: secret },
+  ]) assert.equal((await request('POST', '/integrations/a2a/discover', { revision: initial.revision, target: changed })).status, 400)
+  assert.equal((await request('POST', '/integrations/a2a/discover', { revision: 0, target }, 'foreign-space')).status, 403)
+  assert.equal(cardReads, 1)
+  assert.equal(calls, 0)
+})
+
+test('A2A discovery fences stale revisions and admin revocation during card retrieval', async () => {
+  const initial = await management.view(company, user)
+  const target = initial.targets[0]
+  const saved = await management.save(company, user, initial.revision, config())
+  assert.equal((await request('POST', '/integrations/a2a/discover', { revision: initial.revision, target })).status, 409)
+  assert.equal(cardReads, 0)
+  beforeCard = async () => { await pool.query("UPDATE company_members SET role='member' WHERE company_id=$1 AND user_id=$2", [company, user]) }
+  assert.equal((await request('POST', '/integrations/a2a/discover', { revision: saved.revision, target })).status, 403)
+  assert.equal(cardReads, 1)
+  assert.equal(calls, 0)
+})
+
+test('discovered approval creates an idempotent external member and a real normal-chat trial publishes once', async () => {
+  const initial = await management.view(company, user)
+  const discovered = await management.discoverA2A(company, user, initial.revision, initial.targets[0])
+  const creation = { name: 'Onboarded report agent', requestId: randomUUID() }
+  const created = await request('POST', '/integrations/members', creation)
+  assert.equal(created.status, 200)
+  assert.equal(typeof created.body.id, 'string')
+  if (typeof created.body.id !== 'string') throw new Error('fixture_member_missing')
+  memberId = created.body.id
+  assert.equal((await request('POST', '/integrations/members', creation)).body.id, memberId)
+  assert.equal((await pool.query('SELECT execution_enabled FROM participants WHERE id=$1 AND company_id=$2', [memberId, company])).rows[0].execution_enabled, false)
+  const candidate = config()
+  const binding = candidate.bindings[0]
+  assert.equal(binding.capabilityId, 'a2a.agent')
+  if (binding.capabilityId !== 'a2a.agent') throw new Error('fixture_binding_kind')
+  binding.remoteAgentId = discovered.card.skill.id
+  binding.approval = { authorizationVersion: 'pending', tenantId: company, effectiveConfigDigest: discovered.card.cardSha256,
+    cardSha256: discovered.card.cardSha256, protocolVersion: discovered.card.protocolVersion }
+  assert.equal((await request('PUT', '/integrations', { expectedRevision: discovered.revision, config: candidate })).status, 200)
+  assert.equal(calls, 0)
+  const direct = await request('POST', '/conversations/direct', { otherId: memberId })
+  assert.equal(direct.status, 201)
+  assert.equal(direct.body.created, true)
+  const existing = await request('POST', '/conversations/direct', { otherId: memberId })
+  assert.equal(existing.status, 200)
+  assert.equal(existing.body.id, direct.body.id)
+  const roomId = direct.body.id
+  assert.equal(typeof roomId, 'string')
+  const input = { body: 'A2A onboarding trial input', clientId: randomUUID() }
+  const sent = await request('POST', '/conversations/' + roomId + '/messages', input)
+  assert.equal(sent.status, 202)
+  assert.equal(typeof sent.body.id, 'string')
+  if (typeof sent.body.id !== 'string') throw new Error('fixture_message_missing')
+  await member.drain()
+  const completed = await delivery(sent.body.id)
+  assert.equal(completed.status, 'completed')
+  assert.equal(calls, 1)
+  const repeated = await request('POST', '/conversations/' + roomId + '/messages', input)
+  assert.equal(repeated.body.id, sent.body.id)
+  await member.drain()
+  assert.equal(calls, 1)
+  const replies = await pool.query('SELECT author_id,conversation_id,quoted_message_id,body FROM messages WHERE external_delivery_id=$1', [completed.id])
+  assert.equal(replies.rowCount, 1)
+  assert.equal(replies.rows[0].author_id, memberId)
+  assert.equal(replies.rows[0].conversation_id, roomId)
+  assert.equal(replies.rows[0].quoted_message_id, sent.body.id)
+  const invocation = (await pool.query('SELECT result,remote_ids FROM external_invocations WHERE id=$1', [completed.invocation_id])).rows[0]
+  assert.equal(replies.rows[0].body, invocation.result.answer)
+  assert.ok(invocation.remote_ids.contextId && invocation.remote_ids.taskId)
 })
 
 test('management rejects cross-tenant, ordinary-member and untrusted target changes without leaking credentials', async () => {

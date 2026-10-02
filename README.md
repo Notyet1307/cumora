@@ -77,6 +77,8 @@ Optional feature groups (OAuth login, email via Resend + Cloudflare Email Routin
 
 Workspace owners/admins manage approved WeKnora Agents, A2A Agents and MCP tools in **Workspace settings → Integrations**. Connections and member authorizations live only in PostgreSQL. Saving, importing or rolling back publishes a new revision; it does not execute a remote task. Metadata tests do not prove authentication enforcement or business execution.
 
+For an approved synchronous-text A2A service, **Connect A2A agent** discovers the card, guides explicit authorization and member creation, and offers a real chat trial. See [`docs/A2A_ONBOARDING.md`](docs/A2A_ONBOARDING.md) for the runnable reference example and the distinction between discovery and execution.
+
 The server operator sets `CUMORA_INTEGRATION_TRUST_FILE` to an absolute, non-symlink JSON file owned by the API process user with mode `0600`. It contains only credentials and outbound ceilings, not runtime bindings:
 
 ```json

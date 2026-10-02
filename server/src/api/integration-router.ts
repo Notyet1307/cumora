@@ -42,6 +42,11 @@ export function createIntegrationRouter(deps: {
     const input = body(req.body, ['name', 'requestId'])
     res.json(await getIntegrationManagement().createMember(actor.companyId, actor.userId, input.name as string, input.requestId as string))
   })
+  router.post('/a2a/discover', async (req, res) => {
+    const actor = await deps.requireCompany(req)
+    const input = body(req.body, ['revision', 'target'])
+    res.json(await getIntegrationManagement().discoverA2A(actor.companyId, actor.userId, input.revision, input.target))
+  })
   router.post('/test', async (req, res) => {
     const actor = await deps.requireCompany(req)
     const input = body(req.body, ['revision', 'bindingId'])

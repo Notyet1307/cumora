@@ -11,7 +11,7 @@ import { A2AError, DefaultRequestHandler, InMemoryTaskStore, type AgentExecution
 import { agentCardHandler, jsonRpcHandler } from '@a2a-js/sdk/server/express'
 import express from 'express'
 import { createOpenAIReportGenerator, createReferenceReportAgent, referenceReportCard } from '../../../examples/reference-report-agent/index.js'
-import { A2AAgentClient, a2aCardSha256 } from '../integrations/a2a-agent.js'
+import { A2AAgentClient, a2aCardSha256, discoverA2AAgent } from '../integrations/a2a-agent.js'
 import type { ResolvedA2ABinding } from '../integrations/bindings.js'
 
 const TOKEN = 'synthetic-a2a-bearer-credential'
@@ -67,6 +67,30 @@ async function fixture(t: TestContext, options: {
 }
 
 const input = { input: 'Prepare a synthetic report.', messageId: 'caller-message' }
+
+test('discovery previews bounded approved metadata and hashes the full card without executing a task', async t => {
+  const f = await fixture(t, { changeCard: card => { card.name = 'N'.repeat(120); card.description = 'D'.repeat(3000); card.capabilities.streaming = true } })
+  const summary = await discoverA2AAgent({ baseUrl: f.binding.baseUrl, apiKey: TOKEN, remoteAgentIds: ['report'] }, () => {}, AbortSignal.timeout(3000))
+  assert.equal(summary.name.length, 80)
+  assert.equal(summary.description.length, 2000)
+  assert.equal(summary.cardSha256, a2aCardSha256(f.card))
+  assert.equal(summary.skill.id, 'report')
+  assert.deepEqual(summary.inputModes, ['text/plain'])
+  assert.equal(summary.advertisedCapabilities.streaming, true)
+  assert.equal(JSON.stringify(summary).includes(TOKEN), false)
+  assert.deepEqual(f.requests.map(request => [request.method, request.path]), [['GET', '/.well-known/agent-card.json']])
+})
+
+test('discovery refuses unapproved skills and revoked access without a task submission', async t => {
+  const f = await fixture(t)
+  await assert.rejects(discoverA2AAgent({ baseUrl: f.binding.baseUrl, apiKey: TOKEN, remoteAgentIds: ['other'] }, () => {}, AbortSignal.timeout(3000)), /a2a_skill_rejected/)
+  const revoked = await fixture(t)
+  await assert.rejects(discoverA2AAgent({ baseUrl: revoked.binding.baseUrl, apiKey: TOKEN, remoteAgentIds: ['report'] }, () => {
+    if (revoked.requests.length) throw new Error('discovery_access_revoked')
+  }, AbortSignal.timeout(3000)))
+  assert.equal(f.requests.some(request => request.method === 'POST'), false)
+  assert.equal(revoked.requests.some(request => request.method === 'POST'), false)
+})
 
 test('approved SDK task preserves full text and real IDs without pretending capabilities or sources were verified', async t => {
   const fullText = `# Report\n${'完整正文\n'.repeat(30_000)}END-OF-REPORT`

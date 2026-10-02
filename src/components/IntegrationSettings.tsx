@@ -3,6 +3,7 @@ import { ApiError, api } from '@/api/client'
 import type { BindingConfig, IntegrationBinding, IntegrationConnection, IntegrationManagementView, IntegrationProbeResult, IntegrationTarget } from '@/integration-types'
 import { useLocale, useT } from '@/lib/i18n'
 import { useParticipants } from '@/stores/participants'
+import { A2ASetupWizard } from './A2ASetupWizard'
 
 const inputClass = 'mt-1 w-full min-w-0 rounded-[8px] border border-ink-100 bg-paper px-3 py-2 text-[12px] text-ink-800 focus:border-skype disabled:opacity-50'
 const buttonClass = 'rounded-[8px] border border-ink-100 px-3 py-2 text-[12px] font-semibold text-ink-600 hover:bg-cloud disabled:opacity-40'
@@ -239,11 +240,12 @@ function BindingForm({ binding, view, companyId, busy, onSave, onCancel }: {
   )
 }
 
-export function IntegrationSettings({ companyId }: { companyId: string }) {
+export function IntegrationSettings({ companyId, onOpenConversation }: { companyId: string; onOpenConversation?: () => void }) {
   const t = useT()
   const locale = useLocale()
   const [view, setView] = useState<IntegrationManagementView | null>(null)
   const [section, setSection] = useState<View>('connections')
+  const [wizardOpen, setWizardOpen] = useState(false)
   const [editor, setEditor] = useState<Editor | null>(null)
   const [editorGeneration, setEditorGeneration] = useState(0)
   const [busy, setBusy] = useState<string | null>('load')
@@ -349,6 +351,9 @@ export function IntegrationSettings({ companyId }: { companyId: string }) {
   }
   const isBusy = busy !== null
 
+  if (view && wizardOpen) return <A2ASetupWizard companyId={companyId} view={view} onViewChange={setView}
+    onPublished={published} onClose={() => setWizardOpen(false)} onOpenConversation={onOpenConversation} />
+
   return (
     <section className="min-w-0 space-y-4 p-4 sm:p-5" aria-label={t('integrations.title')} aria-busy={isBusy}>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -358,6 +363,7 @@ export function IntegrationSettings({ companyId }: { companyId: string }) {
           {view && <p className="mt-1 text-[11px] text-ink-500">{t('integrations.revision', { revision: view.revision })}</p>}
         </div>
         <div className="flex flex-wrap gap-2">
+          <button type="button" className={primaryClass} disabled={isBusy || !view || !!editor} onClick={() => setWizardOpen(true)}>{t('a2a.title')}</button>
           <button type="button" className={buttonClass} disabled={isBusy} onClick={refresh}>{t('integrations.refresh')}</button>
           <button type="button" className={buttonClass} disabled={isBusy || !view || !!editor} onClick={() => fileInput.current?.click()}>{t('integrations.import')}</button>
           <button type="button" className={buttonClass} disabled={isBusy || !view} onClick={exportFile}>{t('integrations.export')}</button>

@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { Pool, PoolClient } from 'pg'
 import { HttpError } from '../admin.js'
 import { AgentCreationError, createAgentRecord } from '../agents/create.js'
 import { companyTier, TIER_LIMITS } from '../tier.js'
 import { BindingResolver, type BindingActor, type BindingConfig, type IntegrationBinding } from './bindings.js'
 import { probeIntegration } from './connection-probe.js'
+import { discoverA2AAgent } from './a2a-agent.js'
 import { hasIntegrationCredential, isIntegrationLoopbackUrl, validateIntegrationTrust, type IntegrationTrustGrant } from './integration-trust.js'
-import type { IntegrationManagementView, IntegrationProbeResult, IntegrationTarget } from '../../../src/integration-types.js'
+import type { A2ADiscovery, IntegrationManagementView, IntegrationProbeResult, IntegrationTarget } from '../../../src/integration-types.js'
 
 export type { IntegrationTrustGrant } from './integration-trust.js'
 const ID = /^[A-Za-z0-9._:-]{1,128}$/
@@ -296,6 +298,39 @@ export class IntegrationManagement {
         throw error
       }
     })
+  }
+
+  /** Preview one server-approved target without creating a member, binding, or remote task. */
+  async discoverA2A(companyId: string, userId: string, revision: unknown, target: unknown): Promise<A2ADiscovery> {
+    revisionNumber(revision)
+    const reauthorize = async () => {
+      await this.#admin(companyId, userId)
+      const current = await this.#current(companyId)
+      if ((current?.revision ?? 0) !== revision) throw new HttpError(409, 'integration_stale_revision')
+    }
+    await reauthorize()
+    let selected: { target: IntegrationTarget; apiKey: string } | undefined
+    for (const grant of this.#grants) {
+      if (grant.backend !== 'a2a' || !grant.companyIds.includes(companyId)) continue
+      for (const baseUrl of grant.baseUrls) {
+        const candidate: IntegrationTarget = { secretRef: grant.secretRef, credentialRevision: grant.credentialRevision,
+          backend: grant.backend, baseUrl, knowledgeBaseIds: [...grant.knowledgeBaseIds], remoteAgentIds: [...grant.remoteAgentIds], toolNames: [...grant.toolNames] }
+        if (isDeepStrictEqual(target, candidate)) { selected = { target: candidate, apiKey: grant.value }; break }
+      }
+      if (selected) break
+    }
+    policy(selected)
+    try {
+      const card = await discoverA2AAgent({ baseUrl: selected.target.baseUrl, apiKey: selected.apiKey,
+        remoteAgentIds: selected.target.remoteAgentIds }, reauthorize, AbortSignal.timeout(30_000))
+      await reauthorize()
+      if (hasIntegrationCredential(card, this.#grants)) throw new HttpError(502, 'integration_discovery_unavailable')
+      return { revision, target: selected.target, card }
+    } catch (error) {
+      await reauthorize()
+      if (error instanceof HttpError) throw error
+      throw new HttpError(502, 'integration_discovery_unavailable')
+    }
   }
 
   async test(companyId: string, userId: string, revision: number, bindingId: string): Promise<IntegrationProbeResult> {

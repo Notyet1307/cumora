@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { DefaultAgentCardResolver, JsonRpcTransport } from '@a2a-js/sdk/client'
 import type { ResolvedA2ABinding } from './bindings.js'
+import type { A2ACardSummary } from '../../../src/integration-types.js'
 import { createProtocolFetch } from './protocol-http.js'
 import { AGENT_LIMITS } from './weknora-agent.js'
 
@@ -43,30 +44,49 @@ function bearerSecurity(value: unknown, schemes: Record<string, unknown>): boole
   })
 }
 
-function approvedCard(value: unknown, binding: ResolvedA2ABinding): Record<string, unknown> {
+/** Shared discovery/runtime policy. Discovery reads metadata only and grants no execution rights. */
+export async function discoverA2AAgent(
+  target: { baseUrl: string; apiKey: string; remoteAgentIds: readonly string[] },
+  authorize: () => void | Promise<void>, signal: AbortSignal,
+): Promise<A2ACardSummary> {
+  const cardFetch = createProtocolFetch(target.baseUrl, target.apiKey, authorize,
+    AbortSignal.any([signal, AbortSignal.timeout(AGENT_LIMITS.firstResponseMs)]), [CARD_PATH])
+  const value: unknown = await new DefaultAgentCardResolver({ fetchImpl: cardFetch, path: CARD_PATH }).resolve(target.baseUrl)
   const card = object(value)
-  if (!card || containsSecret(card, binding.apiKey) || a2aCardSha256(card) !== binding.approval.cardSha256
-    || binding.approval.effectiveConfigDigest !== binding.approval.cardSha256
-    || card.protocolVersion !== '0.3.0' || binding.approval.protocolVersion !== '0.3.0'
-    || card.url !== binding.baseUrl || (card.preferredTransport !== undefined && card.preferredTransport !== 'JSONRPC')
-    || !['name', 'description', 'version'].every(key => typeof card[key] === 'string' && (card[key] as string).trim())
+  if (!card || containsSecret(card, target.apiKey) || card.protocolVersion !== '0.3.0'
+    || card.url !== target.baseUrl || (card.preferredTransport !== undefined && card.preferredTransport !== 'JSONRPC')
+    || typeof card.name !== 'string' || !card.name.trim() || typeof card.description !== 'string' || !card.description.trim()
+    || typeof card.version !== 'string' || !card.version.trim()
     || !textModes(card.defaultInputModes) || !textModes(card.defaultOutputModes)) throw new Error('a2a_card_rejected')
   const capabilities = object(card.capabilities)
   if (!capabilities || ['streaming', 'pushNotifications', 'stateTransitionHistory'].some(key => capabilities[key] !== undefined && typeof capabilities[key] !== 'boolean')) throw new Error('a2a_capabilities_rejected')
   if (capabilities.extensions !== undefined && (!Array.isArray(capabilities.extensions)
     || capabilities.extensions.some(extension => !object(extension) || typeof extension.uri !== 'string' || (extension.required !== undefined && extension.required !== false)))) throw new Error('a2a_extension_rejected')
   if (card.additionalInterfaces !== undefined && (!Array.isArray(card.additionalInterfaces)
-    || card.additionalInterfaces.some(entry => !object(entry) || entry.url !== binding.baseUrl || entry.transport !== 'JSONRPC'))) throw new Error('a2a_interface_rejected')
+    || card.additionalInterfaces.some(entry => !object(entry) || entry.url !== target.baseUrl || entry.transport !== 'JSONRPC'))) throw new Error('a2a_interface_rejected')
   const schemes = object(card.securitySchemes)
   if (!schemes || !bearerSecurity(card.security, schemes)) throw new Error('a2a_authentication_rejected')
-  // A2A 0.3 has no standard skill selector in message/send. Do not invent a routing
-  // extension: an approved endpoint must expose exactly the one approved skill.
+  // A2A 0.3 has no standard skill selector; the approved endpoint exposes one skill.
   const skill = Array.isArray(card.skills) && card.skills.length === 1 ? object(card.skills[0]) : null
-  if (!skill || skill.id !== binding.remoteAgentId || typeof skill.name !== 'string' || typeof skill.description !== 'string'
+  if (!skill || typeof skill.id !== 'string' || !target.remoteAgentIds.includes(skill.id)
+    || typeof skill.name !== 'string' || typeof skill.description !== 'string'
     || !Array.isArray(skill.tags) || !skill.tags.every(tag => typeof tag === 'string')
-    || !textModes(skill.inputModes ?? card.defaultInputModes) || !textModes(skill.outputModes ?? card.defaultOutputModes)
     || (skill.security !== undefined && !bearerSecurity(skill.security, schemes))) throw new Error('a2a_skill_rejected')
-  return capabilities
+  const inputModes = skill.inputModes ?? card.defaultInputModes, outputModes = skill.outputModes ?? card.defaultOutputModes
+  if (!textModes(inputModes) || !textModes(outputModes)) throw new Error('a2a_skill_rejected')
+  await authorize()
+  signal.throwIfAborted()
+  return {
+    name: card.name.trim().slice(0, 80), description: card.description.slice(0, 2000), version: card.version.slice(0, 128),
+    protocolVersion: '0.3.0', cardSha256: a2aCardSha256(card),
+    skill: { id: skill.id, name: skill.name.slice(0, 128), description: skill.description.slice(0, 2000), tags: skill.tags.slice(0, 32).map(tag => tag.slice(0, 80)) },
+    inputModes: [...new Set(inputModes)], outputModes: [...new Set(outputModes)],
+    advertisedCapabilities: {
+      ...(typeof capabilities.streaming === 'boolean' ? { streaming: capabilities.streaming } : {}),
+      ...(typeof capabilities.pushNotifications === 'boolean' ? { pushNotifications: capabilities.pushNotifications } : {}),
+      ...(typeof capabilities.stateTransitionHistory === 'boolean' ? { stateTransitionHistory: capabilities.stateTransitionHistory } : {}),
+    },
+  }
 }
 
 function textParts(value: unknown): string {
@@ -126,10 +146,10 @@ export class A2AAgentClient {
   /** Discovery only: never sends a message or invokes a model. */
   async preflight(signal: AbortSignal): Promise<Record<string, unknown>> {
     const binding = this.#binding
-    const cardFetch = createProtocolFetch(binding.baseUrl, binding.apiKey, this.#authorize,
-      AbortSignal.any([signal, AbortSignal.timeout(AGENT_LIMITS.firstResponseMs)]), [CARD_PATH])
-    const card = await new DefaultAgentCardResolver({ fetchImpl: cardFetch, path: CARD_PATH }).resolve(binding.baseUrl)
-    return approvedCard(card, binding)
+    const card = await discoverA2AAgent({ baseUrl: binding.baseUrl, apiKey: binding.apiKey, remoteAgentIds: [binding.remoteAgentId] }, this.#authorize, signal)
+    if (card.cardSha256 !== binding.approval.cardSha256 || binding.approval.effectiveConfigDigest !== card.cardSha256
+      || binding.approval.protocolVersion !== card.protocolVersion) throw new Error('a2a_card_rejected')
+    return { ...card.advertisedCapabilities }
   }
 
   async submit(input: { input: string; messageId: string; contextId?: string }, onIds: (ids: Record<string, string>) => Promise<void>, signal: AbortSignal, onDispatch: () => void): Promise<A2AAgentResult> {

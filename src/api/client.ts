@@ -1,5 +1,5 @@
 import { getActiveCompanyId, getAuthToken, useAuth } from '@/stores/auth'
-import type { BindingConfig, IntegrationManagementView, IntegrationProbeResult } from '@/integration-types'
+import type { A2ADiscovery, BindingConfig, IntegrationManagementView, IntegrationProbeResult, IntegrationTarget } from '@/integration-types'
 import type {
   BoardCardComment, BoardCardLookup, BoardSnapshot, BoardSummary,
   CalendarDispatch, CalendarEvent, CalendarEventKind, CalendarEventStatus,
@@ -863,6 +863,8 @@ export const api = {
   listCompanies: () =>
     http<Array<{ id: string; name: string; slug: string; createdAt: string; role: string }>>('/companies'),
   getIntegrations: () => http<IntegrationManagementView>('/integrations'),
+  discoverA2AIntegration: (revision: number, target: IntegrationTarget) =>
+    http<A2ADiscovery>('/integrations/a2a/discover', { method: 'POST', body: JSON.stringify({ revision, target }) }),
   saveIntegrations: (expectedRevision: number, config: BindingConfig) =>
     http<IntegrationManagementView>('/integrations', {
       method: 'PUT', body: JSON.stringify({ expectedRevision, config }),

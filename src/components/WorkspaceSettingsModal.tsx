@@ -134,7 +134,7 @@ export function WorkspaceSettingsModal({ company, companyCount, onInvite, onClos
           </nav>
         )}
         {section === 'integrations' && (company.role === 'owner' || company.role === 'admin') ? (
-          <IntegrationSettings key={company.id} companyId={company.id} />
+          <IntegrationSettings key={company.id} companyId={company.id} onOpenConversation={onClose} />
         ) : (
         <>
         <section className="px-5 py-4">
